@@ -15,6 +15,7 @@ void TestFactory::testInt()
 
 struct Base
 {
+    virtual ~Base() {}
     virtual int getID() = 0;
 };
 

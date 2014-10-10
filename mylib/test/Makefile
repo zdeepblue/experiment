@@ -1,12 +1,11 @@
 SRC=$(wildcard *.cpp)
 OBJ=$(patsubst %.cpp,%.o,$(SRC))
-CXXFLAGS=-I. -I.. -I../DAG
-LDLIBS=-lcppunit
+CXXFLAGS=-I. -I.. -I../DAG -I/usr/local/include
+LDLIBS=-lcppunit -L/usr/local/lib
 OBJDEP=../Node.o ../DAG/DAG.o
-CC=g++
 
 runtest: $(OBJ) $(OBJDEP)
-	$(CC) $^ $(LDLIBS) -o $@
+	$(CXX) $^ $(LDLIBS) -o $@
 	
 # DO NOT DELETE
 

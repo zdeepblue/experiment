@@ -27,7 +27,7 @@ public:
       * Default creator
       */
     template <typename D>
-    static bool registerCreator(const ID&, const D* p=NULL);
+    static bool registerCreator(const ID&);
 
     /**
       * creator is functor or function pointer
@@ -47,7 +47,7 @@ private:
     static boost::function<T*()> makeCreator(const D* p=NULL)
     {
 	Creator<D> d;
-	boost::function<T*()> f = d;
+	boost::function<D*()> f = d;
 	return f;
     }
 
@@ -72,7 +72,7 @@ T* Factory<T, ID>::createInstance(const ID& id)
 
 template <typename T, typename ID>
 template <typename D>
-bool Factory<T, ID>::registerCreator(const ID& id, const D*)
+bool Factory<T, ID>::registerCreator(const ID& id)
 {
     return getCreatorMap().insert(make_pair(id, makeCreator<D>())).second;
 }

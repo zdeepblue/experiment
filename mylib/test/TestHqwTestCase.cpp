@@ -10,6 +10,7 @@ class TestDemo1 : public hqw::TestCaseBase<TestDemo1>
     bool run()
     {
       ++s_runs;
+      return true;
     }
     int getRuns()
     {
