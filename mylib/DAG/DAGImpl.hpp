@@ -4,18 +4,20 @@
 #include <boost/lexical_cast.hpp>
 #include <deque>
 #include "DAGImplRow.hpp"
-#include "DAGImplManager.hpp"
+#include "Factory.hpp"
 #include "AutoRegister.hpp"
 #include "IDAG.h"
 
 namespace hqw { namespace impl {
+
+typedef hqw::Factory<IDAG, const char *> DAGImplManager;
 
 struct DAGImplRegister
 {
   template <typename T>
   bool operator () (T* ) const
   {
-    return DAGImplManager::getInstance().registerDAGImpl<T>(T::getName());
+    return DAGImplManager::registerCreator<T>(T::getName());
   }
 };
 

@@ -74,14 +74,14 @@ template <typename T, typename ID>
 template <typename D>
 bool Factory<T, ID>::registerCreator(const ID& id)
 {
-    return getCreatorMap().insert(make_pair(id, makeCreator<D>())).second;
+    return getCreatorMap().insert(std::make_pair(id, makeCreator<D>())).second;
 }
 
 template <typename T, typename ID>
 template <typename F>
 bool Factory<T, ID>::registerCreator(const ID& id, F func)
 {
-    return getCreatorMap().insert(make_pair(id, makeCreatorWrapper(func))).second;
+    return getCreatorMap().insert(std::make_pair(id, makeCreatorWrapper(func))).second;
 }
 }
 

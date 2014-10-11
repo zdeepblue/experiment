@@ -5,7 +5,7 @@ namespace hqw {
 
 
 DAG::DAG(const char * tableID)
-  : m_impl(hqw::impl::DAGImplManager::getInstance().createDAGImpl(tableID))
+  : m_impl(hqw::impl::DAGImplManager::createInstance(tableID))
 {
 }
 
