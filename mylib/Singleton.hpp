@@ -1,13 +1,13 @@
 #ifndef HQW_SINGLETON_HPP
 #define HQW_SINGLETON_HPP
+
+#include <boost/noncopyable.hpp>
+
 namespace hqw
 {
 template <typename Derived>
-class Singleton
+class Singleton : public boost::noncopyable
 {
-protected:
-    Singleton(){}
-    Singleton(const Singleton&);
 public:
     static Derived* getInstance();    
 
