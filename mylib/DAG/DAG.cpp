@@ -9,6 +9,11 @@ DAG::DAG(const char * tableID)
 {
 }
 
+DAG::~DAG()
+{
+  delete m_impl;
+}
+
 void DAG::_setValue(unsigned int row, unsigned int col, long val)
 {
   assert(m_impl != NULL);

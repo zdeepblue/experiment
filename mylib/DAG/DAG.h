@@ -13,6 +13,8 @@ class DAG
   public:
     DAG() : m_impl(NULL) {}
     explicit DAG(const char * tableID);
+    ~DAG();
+
     template <typename T>
     void setValue(unsigned int row, unsigned int col, const T& val)
     {
