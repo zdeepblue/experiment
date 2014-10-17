@@ -18,16 +18,16 @@ class UnionFind
       {
         r = m_id[r];
       }
-      while ( i != m_id[i])
+      while ( i != r)
       {
         unsigned int j = m_id[i];
         m_id[i] = r;
-        i = j
+        i = j;
       }
       return r;
     }
   public:
-    UnionFind()
+    UnionFind() noexcept
     {
       for (unsigned int i = 0; i < SZ; ++i)
       {
@@ -36,12 +36,16 @@ class UnionFind
       }
     }
 
-    bool union2(unsigned int i, unsigned int j)
+    unsigned int getSize() constexpr
     {
-      if (i >= SZ || j >= SZ) return false;
+      return SZ;
+    }
+
+    void union2(unsigned int i, unsigned int j)
+    {
       unsigned int iRoot = root(i);
       unsigned int jRoot = root(j);
-      if (iRoot == jRoot) return false;
+      if (iRoot == jRoot) return ;
       if (m_sz[iRoot] < m_sz[jRoot])
       {
         m_id[iRoot] = jRoot;
@@ -52,8 +56,6 @@ class UnionFind
         m_id[jRoot] = iRoot;
         m_sz[iRoot] += m_sz[jRoot];
       }
-
-      return true;
     }
 
     bool find(unsigned int i, unsigned int j)
