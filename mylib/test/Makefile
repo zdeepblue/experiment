@@ -17,4 +17,5 @@ TestNode.o: TestNode.hpp ../NodeVisitor.hpp ../DataWrapper.hpp ../LeafNode.hpp .
 TestHqwTestCase.o: TestHqwTestCase.hpp ../TestCase.hpp ../TestCaseManager.hpp ../AutoRegister.hpp 
 TestDAG.o: TestDAG.hpp ../DAG/DAG.h
 TestDAGDemoTable.o: $(wildcard ../DAG/*.hpp)
+TestUnionFind.o: TestUnionFind.hpp ../union-find.hpp
 

@@ -27,7 +27,7 @@ class UnionFind
       return r;
     }
   public:
-    UnionFind() noexcept
+    UnionFind()
     {
       for (unsigned int i = 0; i < SZ; ++i)
       {
@@ -36,7 +36,7 @@ class UnionFind
       }
     }
 
-    unsigned int getSize() constexpr
+    unsigned int getSize() const
     {
       return SZ;
     }
@@ -58,7 +58,7 @@ class UnionFind
       }
     }
 
-    bool find(unsigned int i, unsigned int j)
+    bool isConnected(unsigned int i, unsigned int j)
     {
       return root(i) == root(j);
     }
