@@ -1,6 +1,6 @@
 SRC=$(wildcard *.cpp)
 OBJ=$(patsubst %.cpp,%.o,$(SRC))
-CXXFLAGS=-I. -I.. -I../DAG -I/usr/local/include
+CXXFLAGS+=-I. -I.. -I../DAG -I/usr/local/include -Wno-c++11-extensions
 LDLIBS=-lcppunit -L/usr/local/lib
 OBJDEP=../Node.o ../DAG/DAG.o
 
@@ -18,4 +18,5 @@ TestHqwTestCase.o: TestHqwTestCase.hpp ../TestCase.hpp ../TestCaseManager.hpp ..
 TestDAG.o: TestDAG.hpp ../DAG/DAG.h
 TestDAGDemoTable.o: $(wildcard ../DAG/*.hpp)
 TestUnionFind.o: TestUnionFind.hpp ../union-find.hpp
+TestThreeSumZero.o: TestThreeSumZero.hpp ../ThreeSumZero.hpp
 
