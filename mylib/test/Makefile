@@ -1,6 +1,6 @@
 SRC=$(wildcard *.cpp)
 OBJ=$(patsubst %.cpp,%.o,$(SRC))
-CXXFLAGS+=-I. -I.. -I../DAG -I/usr/local/include -Wno-c++11-extensions
+CXXFLAGS+=-I. -I.. -I../DAG -I/usr/local/include
 LDLIBS=-lcppunit -L/usr/local/lib
 OBJDEP=../Node.o ../DAG/DAG.o
 
