@@ -19,4 +19,4 @@ TestDAG.o: TestDAG.hpp ../DAG/DAG.h
 TestDAGDemoTable.o: $(wildcard ../DAG/*.hpp)
 TestUnionFind.o: TestUnionFind.hpp ../union-find.hpp
 TestThreeSumZero.o: TestThreeSumZero.hpp ../ThreeSumZero.hpp
-
+TestSort.o: TestSort.hpp ../sort.hpp
