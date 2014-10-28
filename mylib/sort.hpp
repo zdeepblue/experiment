@@ -22,12 +22,12 @@ namespace {
     }
     _mergeSort(axBeg, axBeg+half, beg);
     _mergeSort(axBeg+half, axBeg+len, beg+half);
-    if (*(axBeg+half-1) < *(axBeg+half))
+    if (!(*(axBeg+half) < *(axBeg+half-1)))
     {
       Iter j = beg;
       for (Iter2 i = axBeg; i != axBeg+len ;)
       {
-        *j++ = *i++;
+        *j++ = std::move(*i++);
       }
       return;
     }
@@ -36,19 +36,19 @@ namespace {
     {
       if (i == (axBeg + half))
       {
-        *k++ = *j++;
+        *k++ = std::move(*j++);
       }
       else if (j == (axBeg + len))
       {
-        *k++ = *i++;
+        *k++ = std::move(*i++);
       }
       else if (*j < *i)
       {
-        *k++ = *j++;
+        *k++ = std::move(*j++);
       }
       else
       {
-        *k++ = *i++;
+        *k++ = std::move(*i++);
       }
     }
   }
