@@ -22,9 +22,8 @@ void TestDAG::testAutoRegDAG()
   dagDemo.getValue(0, COL_NAME,name);
   CPPUNIT_ASSERT(name == "Steven Huang");
 
-  // 3, duplicate (workaround due to no C++11 compiler support std::move)
-  hqw::DAG dupDag;
-  dagDemo.duplicate().swap(dupDag);
+  // 3, duplicate 
+  hqw::DAG dupDag(dagDemo);
   // make sure origin dag is unchanged
   CPPUNIT_ASSERT(dagDemo.getRowCount() == 1);
   dagDemo.getValue(0, COL_ID,id);
