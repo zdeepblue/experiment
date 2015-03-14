@@ -1,12 +1,17 @@
 SRC=$(wildcard *.cpp)
 OBJ=$(patsubst %.cpp,%.o,$(SRC))
-CXXFLAGS+=-I. -I.. -I../DAG -I/usr/local/include
-LDLIBS=-lcppunit -L/usr/local/lib
+CXXFLAGS+=-I. -I.. -I../DAG -I/Users/huangqiwei/workspace/cppunit/include -I/usr/local/include
+CXXFLAGS+=--std=c++0x -O2 
+LDLIBS=-L/Users/huangqiwei/workspace/cppunit/lib -lcppunit 
 OBJDEP=../Node.o ../DAG/DAG.o
+
+all: runtest
 
 runtest: $(OBJ) $(OBJDEP)
 	$(CXX) $^ $(LDLIBS) -o $@
 	
+clean:
+	rm -rf $(wildcard *.o) $(wildcard ../*.o) ./runtest
 # DO NOT DELETE
 
 TestCountable.o: TestCountable.hpp ../Countable.hpp

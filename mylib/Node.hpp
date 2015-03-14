@@ -17,7 +17,7 @@ namespace hqw
       Node& operator = (const Node& rhs);
     protected:
       Node() 
-        : m_parent(NULL)
+        : m_parent(nullptr)
       {}
       // deep clean
       virtual ~Node();
