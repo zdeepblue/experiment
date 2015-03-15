@@ -2,7 +2,8 @@
 #define HQW_FACTORY_HPP
 #include <map>
 #include <string>
-#include <boost/function.hpp>
+#include <functional>
+#include <memory>
 namespace
 {
 template <typename D>
@@ -21,7 +22,7 @@ template <typename T, typename ID=std::string>
 class Factory
 {
 public:    
-    static T* createInstance(const ID&);
+    static std::unique_ptr<T> createInstance(const ID&);
 
     /**
       * Default creator
@@ -36,38 +37,39 @@ public:
     static bool registerCreator(const ID&, Functor);
 
 private:
-    typedef std::map<ID, boost::function<T*()> > creatorMap_t;
+    using Creator_t = std::function<T*()>;
+    using creatorMap_t = std::map<ID, Creator_t>;
     static creatorMap_t& getCreatorMap()
     {
-	static creatorMap_t creatorMap;
-	return creatorMap;
+        static creatorMap_t creatorMap;
+        return creatorMap;
     }
     
     template <typename D>
-    static boost::function<T*()> makeCreator(const D* p=NULL)
+    static Creator_t makeCreator(const D* p=nullptr)
     {
-	Creator<D> d;
-	boost::function<D*()> f = d;
-	return f;
+        Creator<D> d;
+        Creator_t f = d;
+        return f;
     }
 
     template <typename F>
-    static boost::function<T*()> makeCreatorWrapper(F func)
+    static Creator_t makeCreatorWrapper(F func)
     {
-	boost::function<T*()> f = func;
-	return f;
+        Creator_t f = func;
+        return f;
     }
 };
 
 template <typename T, typename ID>
-T* Factory<T, ID>::createInstance(const ID& id)
+std::unique_ptr<T> Factory<T, ID>::createInstance(const ID& id)
 {
     typename creatorMap_t::iterator it = getCreatorMap().find(id);
     if (it != getCreatorMap().end())
     {
-	return (it->second)();
+        return std::unique_ptr<T>((it->second)());
     }
-    return NULL;
+    return std::unique_ptr<T>();
 }
 
 template <typename T, typename ID>

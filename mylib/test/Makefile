@@ -11,7 +11,7 @@ runtest: $(OBJ) $(OBJDEP)
 	$(CXX) $^ $(LDLIBS) -o $@
 	
 clean:
-	rm -rf $(wildcard *.o) $(wildcard ../*.o) ./runtest
+	rm -rf $(wildcard *.o) $(OBJDEP) ./runtest
 # DO NOT DELETE
 
 TestCountable.o: TestCountable.hpp ../Countable.hpp
