@@ -11,9 +11,9 @@ namespace hqw
   class InnerNode : public Node, public DataWrapper<T>
   {
     private:
-      InnerNode& operator = (const InnerNode&);
+      InnerNode& operator = (const InnerNode&) = delete;
     public:
-      void accept(NodeVisitor* pVisitor);
+      void accept(NodeVisitor* pVisitor) override;
       InnerNode * clone() override;
   };
 

@@ -6,7 +6,7 @@ namespace hqw
   class NodeVisitor
   {
     public:
-      virtual ~NodeVisitor() {}
+      virtual ~NodeVisitor() = default;
       virtual void visitInnerNode(Node* node) = 0;
       virtual void visitLeafNode(Node* node) = 0;
   };

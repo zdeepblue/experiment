@@ -11,10 +11,10 @@ namespace hqw
   class LeafNode : public Node, public DataWrapper<T>
   {
     private:
-      LeafNode& operator = (const LeafNode&);
+      LeafNode& operator = (const LeafNode&) = delete;
     public:
-      void accept(NodeVisitor* pVisitor);
-      LeafNode* clone();
+      void accept(NodeVisitor* pVisitor) override;
+      LeafNode* clone() override;
   };
 
   template <typename T>
