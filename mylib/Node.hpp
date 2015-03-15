@@ -2,42 +2,50 @@
 #define HQW_NODE_HPP
 
 #include <list>
+#include <memory>
 
 namespace hqw
 {
   class NodeVisitor;
-  class Node;
   class Node
   {
     public:
-      typedef std::list<Node*> nodes_type;
+      using nodes_type = std::list<std::unique_ptr<Node>>;
     private:
       nodes_type m_children;
       Node* m_parent;
-      Node& operator = (const Node& rhs);
+      Node& operator = (const Node& rhs) = delete;
     protected:
       Node() 
         : m_parent(nullptr)
       {}
-      // deep clean
-      virtual ~Node();
-      // deep copy
+      // deep copy construct only
       Node(const Node& rhs);
+      // move construct only
+      Node(Node&& rhs) noexcept
+        : m_children(std::move(rhs.m_children)), m_parent(rhs.m_parent)
+      {
+      }
     public:
-      nodes_type& getChildren()
+      virtual ~Node() = default;
+      nodes_type getChildren() &&
+      {
+        return std::move(m_children);
+      }
+      nodes_type& getChildren() &
       {
         return m_children;
       }
-      const nodes_type& getChildren() const
+      const nodes_type& getChildren() const&
       {
         return m_children;
       }
-      void addChild(Node* child)
+      void addChild(std::unique_ptr<Node> child)
       {
-        m_children.push_back(child);
         child->m_parent = this;
+        m_children.emplace_back(std::move(child));
       }
-      virtual Node * clone() = 0;
+      virtual Node* clone() = 0;
       virtual void accept(NodeVisitor* pVisitor) = 0;
   };
 }

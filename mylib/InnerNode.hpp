@@ -14,7 +14,7 @@ namespace hqw
       InnerNode& operator = (const InnerNode&);
     public:
       void accept(NodeVisitor* pVisitor);
-      InnerNode * clone();
+      InnerNode * clone() override;
   };
 
   template <typename T>

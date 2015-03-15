@@ -1,8 +1,10 @@
+#include <algorithm>
 #include "TestNode.hpp"
 #include "InnerNode.hpp"
 #include "LeafNode.hpp"
 
 using namespace CppUnit;
+using namespace std;
 
 typedef hqw::InnerNode<int> iNode;
 typedef hqw::LeafNode<int> lNode;
@@ -18,12 +20,8 @@ class Increase : public hqw::NodeVisitor
       {
         ++node->data;
         iNode::nodes_type& children = node->getChildren();
-        for (iNode::nodes_type::iterator it = children.begin();
-            it != children.end();
-            ++it)
-        {
-          (*it)->accept(this);
-        }
+        for_each(children.begin(), children.end(), 
+            [this](unique_ptr<hqw::Node>& node){node->accept(this);});
       }
     }
     void visitLeafNode(hqw::Node* pNode)
@@ -61,18 +59,18 @@ class Decrease : public hqw::NodeVisitor
     }
 };
 
-hqw::Node * createNodeTree()
+unique_ptr<hqw::Node> createNodeTree()
 {
-  iNode * root = new iNode();
-  iNode * node1 = new iNode();
-  iNode * node2 = new iNode();
-  root->addChild(node1);
-  root->addChild(node2);
-  lNode * node3 = new lNode();
-  node1->addChild(node3);
-  lNode * node4 = new lNode();
-  node2->addChild(node4);
-  return root;
+  unique_ptr<iNode> root(new iNode());
+  unique_ptr<iNode> node1(new iNode());
+  unique_ptr<iNode> node2(new iNode());
+  unique_ptr<lNode> node4(new lNode());
+  node2->addChild(std::move(node4));
+  unique_ptr<lNode> node3(new lNode());
+  node1->addChild(std::move(node3));
+  root->addChild(std::move(node1));
+  root->addChild(std::move(node2));
+  return std::move(root);
 }
 
 void checkData(hqw::Node* pNode, int val)
@@ -85,7 +83,7 @@ void checkData(hqw::Node* pNode, int val)
         it != children.end();
         ++it)
     {
-      checkData(*it, val);
+      checkData((*it).get(), val);
     }
   }
   else if (lNode* node = dynamic_cast<lNode*>(pNode))
@@ -121,7 +119,7 @@ void checkSameTree(hqw::Node* pNode, hqw::Node* pNode2, bool sameData = true)
         it != children.end();
         ++it, ++it2)
     {
-      checkSameTree(*it, *it2, sameData);
+      checkSameTree((*it).get(), (*it2).get(), sameData);
     }
   }
   else if (lNode* node = dynamic_cast<lNode*>(pNode))
@@ -147,22 +145,22 @@ void checkSameTree(hqw::Node* pNode, hqw::Node* pNode2, bool sameData = true)
 }
 void TestNode::testClone()
 {
-  hqw::Node * pTree = createNodeTree();
-  checkData(pTree, 0);
-  hqw::Node * pTree2 = pTree->clone();
-  checkSameTree(pTree, pTree2);
+  unique_ptr<hqw::Node> pTree(createNodeTree());
+  checkData(pTree.get(), 0);
+  unique_ptr<hqw::Node> pTree2(pTree->clone());
+  checkSameTree(pTree.get(), pTree2.get());
 }
 
 void TestNode::testVisitor()
 {
-  hqw::Node * pTree = createNodeTree();
-  checkData(pTree, 0);
+  unique_ptr<hqw::Node> pTree = createNodeTree();
+  checkData(pTree.get(), 0);
   Increase inc;
   pTree->accept(&inc);
-  checkData(pTree, 1);
+  checkData(pTree.get(), 1);
   Decrease dec;
   pTree->accept(&dec);
-  checkData(pTree, 0);
+  checkData(pTree.get(), 0);
 }
 
 CPPUNIT_TEST_SUITE_REGISTRATION(TestNode);
