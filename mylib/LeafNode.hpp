@@ -11,8 +11,21 @@ namespace hqw
   class LeafNode : public Node, public DataWrapper<T>
   {
     private:
+      using Data = DataWrapper<T>;
       LeafNode& operator = (const LeafNode&) = delete;
     public:
+      const T& getData() const&
+      {
+        return Data::data;
+      }
+      T& getData() &
+      {
+        return Data::data;
+      }
+      T getData() &&
+      {
+        return std::move(Data::data);
+      }
       void accept(NodeVisitor* pVisitor) override;
       LeafNode* clone() override;
   };

@@ -18,7 +18,7 @@ class Increase : public hqw::NodeVisitor
     {
       if (iNode * node = dynamic_cast<iNode*>(pNode))
       {
-        ++node->data;
+        ++node->getData();
         iNode::nodes_type& children = node->getChildren();
         for_each(children.begin(), children.end(), 
             [this](unique_ptr<hqw::Node>& node){node->accept(this);});
@@ -28,7 +28,7 @@ class Increase : public hqw::NodeVisitor
     {
       if (lNode * node = dynamic_cast<lNode*>(pNode))
       {
-        ++node->data;
+        ++node->getData();
       }
     }
 };
@@ -40,7 +40,7 @@ class Decrease : public hqw::NodeVisitor
     {
       if (iNode * node = dynamic_cast<iNode*>(pNode))
       {
-        --node->data;
+        --node->getData();
         iNode::nodes_type& children = node->getChildren();
         for (iNode::nodes_type::iterator it = children.begin();
             it != children.end();
@@ -54,7 +54,7 @@ class Decrease : public hqw::NodeVisitor
     {
       if (lNode * node = dynamic_cast<lNode*>(pNode))
       {
-        --node->data;
+        --node->getData();
       }
     }
 };
@@ -77,7 +77,7 @@ void checkData(hqw::Node* pNode, int val)
 {
   if (iNode* node = dynamic_cast<iNode*>(pNode))
   {
-    CPPUNIT_ASSERT(node->data == val);
+    CPPUNIT_ASSERT(node->getData() == val);
     iNode::nodes_type& children = node->getChildren();
     for (iNode::nodes_type::iterator it = children.begin();
         it != children.end();
@@ -88,7 +88,7 @@ void checkData(hqw::Node* pNode, int val)
   }
   else if (lNode* node = dynamic_cast<lNode*>(pNode))
   {
-    CPPUNIT_ASSERT(node->data == val);
+    CPPUNIT_ASSERT(node->getData() == val);
   }
   else
   {
@@ -106,11 +106,11 @@ void checkSameTree(hqw::Node* pNode, hqw::Node* pNode2, bool sameData = true)
     CPPUNIT_ASSERT(node != node2);
     if (sameData)
     {
-      CPPUNIT_ASSERT(node->data == node2->data);
+      CPPUNIT_ASSERT(node->getData() == node2->getData());
     }
     else
     {
-      CPPUNIT_ASSERT(node->data != node2->data);
+      CPPUNIT_ASSERT(node->getData() != node2->getData());
     }
     iNode::nodes_type& children = node->getChildren();
     iNode::nodes_type& children2 = node2->getChildren();
@@ -129,11 +129,11 @@ void checkSameTree(hqw::Node* pNode, hqw::Node* pNode2, bool sameData = true)
     CPPUNIT_ASSERT(node != node2);
     if (sameData)
     {
-      CPPUNIT_ASSERT(node->data == node2->data);
+      CPPUNIT_ASSERT(node->getData() == node2->getData());
     }
     else
     {
-      CPPUNIT_ASSERT(node->data != node2->data);
+      CPPUNIT_ASSERT(node->getData() != node2->getData());
     }
   }
   else

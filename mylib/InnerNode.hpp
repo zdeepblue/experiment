@@ -11,8 +11,21 @@ namespace hqw
   class InnerNode : public Node, public DataWrapper<T>
   {
     private:
+      using Data = DataWrapper<T>;
       InnerNode& operator = (const InnerNode&) = delete;
     public:
+      const T& getData() const&
+      {
+        return Data::data;
+      }
+      T& getData() &
+      {
+        return Data::data;
+      }
+      T getData() &&
+      {
+        return std::move(Data::data);
+      }
       void accept(NodeVisitor* pVisitor) override;
       InnerNode * clone() override;
   };

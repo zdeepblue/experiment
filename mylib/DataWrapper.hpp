@@ -3,15 +3,13 @@
 
 namespace hqw
 {
-  template <typename T>
+  template <typename T, int ID=1>
   class DataWrapper
   {
     public:
-      DataWrapper()
-      {
-        data = T();
-      }
-      T data;
+      DataWrapper() = default;
+    protected:
+      T data{};
   };
 }
 
