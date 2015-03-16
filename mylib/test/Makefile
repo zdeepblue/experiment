@@ -1,7 +1,7 @@
 SRC=$(wildcard *.cpp)
 OBJ=$(patsubst %.cpp,%.o,$(SRC))
 CXXFLAGS+=-I. -I.. -I../DAG -I/Users/huangqiwei/workspace/cppunit/include -I/usr/local/include
-CXXFLAGS+=--std=c++11 -g -O2
+CXXFLAGS+=--std=c++1y -g -O2
 LDLIBS=-L/Users/huangqiwei/workspace/cppunit/lib -lcppunit 
 OBJDEP=../Node.o ../DAG/DAG.o
 
