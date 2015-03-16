@@ -8,6 +8,9 @@ namespace hqw
   {
     public:
       DataWrapper() = default;
+      explicit DataWrapper(T d)
+        : data(std::move(d))
+      {}
     protected:
       T data{};
   };

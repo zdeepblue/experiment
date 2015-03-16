@@ -59,34 +59,30 @@ class Decrease : public hqw::NodeVisitor
     }
 };
 
-unique_ptr<hqw::Node> createNodeTree()
+unique_ptr<hqw::Node> createNodeTree(int i = 0)
 {
-  unique_ptr<iNode> root(new iNode());
-  unique_ptr<iNode> node1(new iNode());
-  unique_ptr<iNode> node2(new iNode());
-  unique_ptr<lNode> node4(new lNode());
+  unique_ptr<iNode> root(new iNode(i));
+  unique_ptr<iNode> node1(new iNode(i));
+  unique_ptr<iNode> node2(new iNode(i));
+  unique_ptr<lNode> node4(new lNode(i));
   node2->addChild(std::move(node4));
-  unique_ptr<lNode> node3(new lNode());
+  unique_ptr<lNode> node3(new lNode(i));
   node1->addChild(std::move(node3));
   root->addChild(std::move(node1));
   root->addChild(std::move(node2));
   return std::move(root);
 }
 
-void checkData(hqw::Node* pNode, int val)
+void checkData(const hqw::Node* pNode, int val)
 {
-  if (iNode* node = dynamic_cast<iNode*>(pNode))
+  if (const iNode* node = dynamic_cast<const iNode*>(pNode))
   {
     CPPUNIT_ASSERT(node->getData() == val);
-    iNode::nodes_type& children = node->getChildren();
-    for (iNode::nodes_type::iterator it = children.begin();
-        it != children.end();
-        ++it)
-    {
-      checkData((*it).get(), val);
-    }
+    const iNode::nodes_type& children = node->getChildren();
+    for_each(children.cbegin(), children.cend(), 
+        [val](const unique_ptr<hqw::Node>& node) { checkData(node.get(), val);} );
   }
-  else if (lNode* node = dynamic_cast<lNode*>(pNode))
+  else if (const lNode* node = dynamic_cast<const lNode*>(pNode))
   {
     CPPUNIT_ASSERT(node->getData() == val);
   }
@@ -96,13 +92,13 @@ void checkData(hqw::Node* pNode, int val)
   }
 }
 
-void checkSameTree(hqw::Node* pNode, hqw::Node* pNode2, bool sameData = true)
+void checkSameTree(const hqw::Node* pNode, const hqw::Node* pNode2, bool sameData = true)
 {
   CPPUNIT_ASSERT(pNode != pNode2);
-  if (iNode* node = dynamic_cast<iNode*>(pNode))
+  if (const iNode* node = dynamic_cast<const iNode*>(pNode))
   {
-    iNode* node2 = dynamic_cast<iNode*>(pNode2);
-    CPPUNIT_ASSERT(node2 != NULL);
+    const iNode* node2 = dynamic_cast<const iNode*>(pNode2);
+    CPPUNIT_ASSERT(node2 != nullptr);
     CPPUNIT_ASSERT(node != node2);
     if (sameData)
     {
@@ -111,21 +107,22 @@ void checkSameTree(hqw::Node* pNode, hqw::Node* pNode2, bool sameData = true)
     else
     {
       CPPUNIT_ASSERT(node->getData() != node2->getData());
+      return;
     }
-    iNode::nodes_type& children = node->getChildren();
-    iNode::nodes_type& children2 = node2->getChildren();
+    const iNode::nodes_type& children = node->getChildren();
+    const iNode::nodes_type& children2 = node2->getChildren();
     CPPUNIT_ASSERT(children.size() == children2.size());
-    for (iNode::nodes_type::iterator it = children.begin(), it2 = children2.begin();
-        it != children.end();
+    for (iNode::nodes_type::const_iterator it = children.cbegin(), it2 = children2.cbegin();
+        it != children.cend();
         ++it, ++it2)
     {
       checkSameTree((*it).get(), (*it2).get(), sameData);
     }
   }
-  else if (lNode* node = dynamic_cast<lNode*>(pNode))
+  else if (const lNode* node = dynamic_cast<const lNode*>(pNode))
   {
-    lNode* node2 = dynamic_cast<lNode*>(pNode2);
-    CPPUNIT_ASSERT(node2 != NULL);
+    const lNode* node2 = dynamic_cast<const lNode*>(pNode2);
+    CPPUNIT_ASSERT(node2 != nullptr);
     CPPUNIT_ASSERT(node != node2);
     if (sameData)
     {
@@ -145,10 +142,12 @@ void checkSameTree(hqw::Node* pNode, hqw::Node* pNode2, bool sameData = true)
 }
 void TestNode::testClone()
 {
-  unique_ptr<hqw::Node> pTree(createNodeTree());
-  checkData(pTree.get(), 0);
+  unique_ptr<hqw::Node> pTree(createNodeTree(12));
+  checkData(pTree.get(), 12);
   unique_ptr<hqw::Node> pTree2(pTree->clone());
   checkSameTree(pTree.get(), pTree2.get());
+  dynamic_cast<iNode*>(pTree2.get())->getData()++;
+  checkSameTree(pTree.get(), pTree2.get(), false);
 }
 
 void TestNode::testVisitor()

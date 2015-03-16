@@ -14,6 +14,10 @@ namespace hqw
       using Data = DataWrapper<T>;
       LeafNode& operator = (const LeafNode&) = delete;
     public:
+      LeafNode() = default;
+      explicit LeafNode(T data)
+        : Data(std::move(data))
+      {}
       const T& getData() const&
       {
         return Data::data;

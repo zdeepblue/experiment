@@ -14,6 +14,11 @@ namespace hqw
       using Data = DataWrapper<T>;
       InnerNode& operator = (const InnerNode&) = delete;
     public:
+      InnerNode() = default;
+      explicit InnerNode(T data)
+        : Data(std::move(data))
+      {}
+
       const T& getData() const&
       {
         return Data::data;
