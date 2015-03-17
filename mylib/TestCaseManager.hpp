@@ -1,17 +1,20 @@
 #ifndef _HQW_TESTCASEMANAGER_HPP_
 #define _HQW_TESTCASEMANAGER_HPP_
+#include <functional>
+#include <memory>
 #include <map>
 #include <string>
+#include "Singleton.hpp"
 
 namespace 
 {
 template <typename T>
 struct Creator
 {
-	T* operator ()()
-	{
-		return new T();
-	}
+    T* operator ()()
+    {
+        return new T();
+    }
 };
 
 }
@@ -20,42 +23,36 @@ namespace hqw
 {
 class TestCase;
 
-class TestCaseManager
+class TestCaseManager : public Singleton<TestCaseManager>
 {
-  typedef std::map<std::string, TestCase*> CaseMap;
+  typedef std::map<std::string, std::function<TestCase*()>> CaseMap;
 public:
-	template <typename T>
-	bool registerCase(const char* name, T* p = 0)
-	{
-		if (!p) p = Creator<T>()();
-		return getMap().insert(std::make_pair(name, p)).second;
-	}
+    template <typename T>
+    bool registerCase(const char* name, T* = nullptr)
+    {
+        return getMap().insert(std::make_pair(name, Creator<T>())).second;
+    }
 
-        TestCase* getTestCase(const char* name) const
-        {
-          CaseMap::const_iterator it = getMap().find(name);
-          if (it != getMap().end())
-          {
-            return it->second;
-          }
-          return 0;
-        }
+    std::unique_ptr<TestCase> getTestCase(const char* name) const
+    {
+      CaseMap::const_iterator it = getMap().find(name);
+      if (it != getMap().end())
+      {
+        return std::unique_ptr<TestCase>((it->second)());
+      }
+      return std::unique_ptr<TestCase>();
+    }
 
-	static TestCaseManager& getInstance()
-	{
-		static TestCaseManager theTCMgr;
-		return theTCMgr;
-	}
-
-	static CaseMap& getMap()
-	{
-		static CaseMap theMap;
-		return theMap;
-	}
+    static CaseMap& getMap()
+    {
+        static CaseMap theMap;
+        return theMap;
+    }
 private:
-	TestCaseManager() {}
-	TestCaseManager(const TestCaseManager&);
-	TestCaseManager& operator = (const TestCaseManager&);
+    friend class Singleton<TestCaseManager>;
+    TestCaseManager() = default;
+    TestCaseManager(const TestCaseManager&) = delete;
+    TestCaseManager& operator = (const TestCaseManager&) = delete;
 };
 
 }

@@ -9,7 +9,7 @@ namespace hqw {
 class TestCase
 {
 public:
-	virtual ~TestCase() {}
+	virtual ~TestCase() = default;
 	virtual bool run() = 0;
 };
 
@@ -25,10 +25,6 @@ struct CaseRegister
 template <typename T>
 class TestCaseBase : public TestCase, private AutoRegister<T, CaseRegister>
 {
-public:
-  ~TestCaseBase()
-  {
-  }
 };
 
 
