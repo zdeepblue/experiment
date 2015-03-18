@@ -39,6 +39,7 @@ void testCommit(const T& a, const T& b)
        temp = b;
        CPPUNIT_ASSERT(temp == b);
        trans.commit();
+       temp = a;
    }
    CPPUNIT_ASSERT(temp == b);
 }
