@@ -10,12 +10,11 @@ class DefaultTransTraits
 public:
     static void backup(const T& from, T& to)
     {
-	to = from;
+      to = from;
     }
-
-    static void restore(T& from, T& to)
+    static void backup(T&& from, T& to)
     {
-	std::swap(from, to);
+        to = std::move(from);
     }
 };
 
@@ -30,22 +29,20 @@ public:
     bool rollback();
 
 private:
-    Transaction(const Transaction&);
-    Transaction& operator = (const Transaction&);
 
-    void doRollback();
+    void doRollback(T&&);
+    void doRollback(const T&);
     void createBackup();
 
     bool m_committed;
-    T* m_pObj;
+    std::unique_ptr<T> m_pObj;
     T& m_obj;
 };
 
 template <typename T, typename Traits>
 Transaction<T, Traits>::Transaction(T& obj)
-    : m_committed(false), m_pObj(NULL), m_obj(obj)
+    : m_committed(false), m_pObj(std::unique_ptr<T>(new T())), m_obj(obj)
 {
-    m_pObj = new T();
     createBackup();
 }
 
@@ -53,43 +50,47 @@ Transaction<T, Traits>::Transaction(T& obj)
 template <typename T, typename Traits>
 Transaction<T, Traits>::~Transaction()
 {
-    if (!m_pObj) return;
     if (!m_committed)
     {
         try
         {
-	    doRollback();
+            doRollback(std::move(*m_pObj));
         }
         catch (...)
         {
         }
     }
-    delete m_pObj;
 }
 
 template <typename T, typename Traits>
 void Transaction<T, Traits>::commit()
 {
     m_committed = true;
+    createBackup();
 }
 
 
 template <typename T, typename Traits>
 bool Transaction<T, Traits>::rollback()
 {
-    if (!m_committed && m_pObj)
+    if (!m_committed)
     {
-	doRollback();
-        createBackup();
-	return true;
+        doRollback(*m_pObj);
+        return true;
     }
     return false;
 }
 
 template <typename T, typename Traits>
-void Transaction<T, Traits>::doRollback()
+void Transaction<T, Traits>::doRollback(T&& obj)
 {
-    Traits::restore(*m_pObj, m_obj);
+    Traits::backup(std::move(obj), m_obj);
+}
+
+template <typename T, typename Traits>
+void Transaction<T, Traits>::doRollback(const T& obj)
+{
+    Traits::backup(obj, m_obj);
 }
 
 template <typename T, typename Traits>
