@@ -10,11 +10,11 @@ struct prTriple
 {
   prTriple(ostringstream& out) : m_out(out) {}
   template <typename Iter>
-  void operator () (const boost::tuple<Iter, Iter, Iter>& r)
+  void operator () (const tuple<Iter, Iter, Iter>& r)
   {
-    m_out << *boost::get<0>(r) << "," 
-          << *boost::get<1>(r) << ","
-          << *boost::get<2>(r) << endl;
+    m_out << *get<0>(r) << "," 
+          << *get<1>(r) << ","
+          << *get<2>(r) << endl;
   }
 
   string getString() const
