@@ -24,6 +24,9 @@ class Factory
 public:    
     static std::unique_ptr<T> createInstance(const ID&);
 
+    template <typename Del>
+    static std::unique_ptr<T, Del> createInstance(const ID&, Del&&);
+
     /**
       * Default creator
       */
@@ -34,17 +37,18 @@ public:
       * creator is functor or function pointer
       */
     template <typename Functor>
-    static bool registerCreator(const ID&, Functor);
-
+    static bool registerCreator(const ID&, Functor&&);
+    
 private:
     using Creator_t = std::function<T*()>;
     using creatorMap_t = std::map<ID, Creator_t>;
+
     static creatorMap_t& getCreatorMap()
     {
         static creatorMap_t creatorMap;
         return creatorMap;
     }
-    
+
     template <typename D>
     static Creator_t makeCreator(const D* p=nullptr)
     {
@@ -54,9 +58,9 @@ private:
     }
 
     template <typename F>
-    static Creator_t makeCreatorWrapper(F func)
+    static Creator_t makeCreatorWrapper(F&& func)
     {
-        Creator_t f = func;
+        Creator_t f = std::forward<F>(func);
         return f;
     }
 };
@@ -64,12 +68,24 @@ private:
 template <typename T, typename ID>
 std::unique_ptr<T> Factory<T, ID>::createInstance(const ID& id)
 {
-    typename creatorMap_t::iterator it = getCreatorMap().find(id);
-    if (it != getCreatorMap().end())
+    auto it = getCreatorMap().find(id);
+    if (it != getCreatorMap().cend())
     {
         return std::unique_ptr<T>((it->second)());
     }
     return std::unique_ptr<T>();
+}
+
+template <typename T, typename ID>
+template <typename Del>
+std::unique_ptr<T, Del> Factory<T, ID>::createInstance(const ID& id, Del&& d)
+{
+    auto it = getCreatorMap().find(id);
+    if (it != getCreatorMap().cend())
+    {
+        return std::unique_ptr<T, Del>((it->second)(), std::forward<Del>(d));
+    }
+    return std::unique_ptr<T,Del>(nullptr, std::forward<Del>(d));
 }
 
 template <typename T, typename ID>
@@ -81,10 +97,11 @@ bool Factory<T, ID>::registerCreator(const ID& id)
 
 template <typename T, typename ID>
 template <typename F>
-bool Factory<T, ID>::registerCreator(const ID& id, F func)
+bool Factory<T, ID>::registerCreator(const ID& id, F&& func)
 {
-    return getCreatorMap().insert(std::make_pair(id, makeCreatorWrapper(func))).second;
+    return getCreatorMap().insert(std::make_pair(id, makeCreatorWrapper(std::forward<F>(func)))).second;
 }
+
 }
 
 #endif

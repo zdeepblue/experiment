@@ -11,12 +11,14 @@ class TestFactory: public CppUnit::TestCase
     CPPUNIT_TEST(testObject);
     CPPUNIT_TEST(testFuncPtr);
     CPPUNIT_TEST(testFunctor);
+    CPPUNIT_TEST(testDeleter);
     CPPUNIT_TEST_SUITE_END();
 public:
     void testInt();
     void testObject();
     void testFuncPtr();
     void testFunctor();
+    void testDeleter();
 };
 
 

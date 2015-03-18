@@ -71,19 +71,23 @@ struct Derived4 : public Base
     int getID() {return 4;}
 };
 
-struct createD4
-{
-    Base* operator () ()
-    {
-      return new Derived4;
-    }
-};
-
-bool registD4 = Factory<Base>::registerCreator("Derived4", createD4());
+bool registD4 = Factory<Base>::registerCreator("Derived4", []() { return new Derived4();} );
 void TestFactory::testFunctor()
 {
     std::unique_ptr<Base> pB4 = Factory<Base>::createInstance("Derived4");
     CPPUNIT_ASSERT(pB4->getID() == 4);
+}
+
+void TestFactory::testDeleter()
+{
+  bool del_called = false;
+  auto del = [&del_called] (Base* p) mutable { del_called = true; delete p; };
+  {
+    std::unique_ptr<Base, decltype(del)> pB4 = Factory<Base>::createInstance("Derived4", del);
+    CPPUNIT_ASSERT(pB4->getID() == 4);
+  }
+  CPPUNIT_ASSERT(del_called);
+
 }
 
 CPPUNIT_TEST_SUITE_REGISTRATION(TestFactory);

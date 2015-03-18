@@ -17,7 +17,7 @@ class AutoRegister
 };
 
 template <typename T, typename R>
-bool AutoRegister<T,R>::s_isRegistered = R()(static_cast<T*>(NULL));
+bool AutoRegister<T,R>::s_isRegistered = R()(static_cast<T*>(nullptr));
 
 }
 #endif
