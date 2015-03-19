@@ -26,6 +26,10 @@ void testManualRollback(const T& a, const T& b)
        CPPUNIT_ASSERT(temp == b);
        trans.rollback();
        CPPUNIT_ASSERT(temp == a);
+       temp = b;
+       CPPUNIT_ASSERT(temp == b);
+       trans.rollback(true);
+       CPPUNIT_ASSERT(temp == a);
    }
    CPPUNIT_ASSERT(temp == a);
 }
@@ -37,11 +41,16 @@ void testCommit(const T& a, const T& b)
    {
        hqw::Transaction<T> trans(temp);
        temp = b;
-       CPPUNIT_ASSERT(temp == b);
        trans.commit();
+       CPPUNIT_ASSERT(temp == b);
        temp = a;
+       trans.rollback();
+       CPPUNIT_ASSERT(temp == b);
+       temp = a;
+       trans.commit();
+       CPPUNIT_ASSERT(temp == a);
    }
-   CPPUNIT_ASSERT(temp == b);
+   CPPUNIT_ASSERT(temp == a);
 }
 
 template <typename T>

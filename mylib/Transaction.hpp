@@ -25,8 +25,8 @@ public:
     Transaction(T& obj);
     ~Transaction();
 
-    void commit();
-    void rollback();
+    void commit(bool);
+    void rollback(bool);
 
 private:
 
@@ -34,41 +34,48 @@ private:
     void doRollback(const T&);
     void createBackup();
 
-    std::unique_ptr<T> m_pObj;
+    T m_bakObj;
     T& m_obj;
+    bool m_endOfTrans{false};
 };
 
 template <typename T, typename Traits>
 Transaction<T, Traits>::Transaction(T& obj)
-    : m_pObj(std::unique_ptr<T>(new T())), m_obj(obj)
+    : m_bakObj(obj), m_obj(obj)
 {
-    createBackup();
 }
 
 
 template <typename T, typename Traits>
 Transaction<T, Traits>::~Transaction()
 {
-    try
+    if (!m_endOfTrans)
     {
-        doRollback(std::move(*m_pObj));
-    }
-    catch (...)
-    {
+      try
+      {
+        doRollback(std::move(m_bakObj));
+      }
+      catch (...)
+      {
+      }
     }
 }
 
 template <typename T, typename Traits>
-void Transaction<T, Traits>::commit()
+void Transaction<T, Traits>::commit(bool endOfTrans = false)
 {
-    createBackup();
+    if (m_endOfTrans) return;
+    m_endOfTrans = endOfTrans;
+    if (!endOfTrans) createBackup();
 }
 
 
 template <typename T, typename Traits>
-void Transaction<T, Traits>::rollback()
+void Transaction<T, Traits>::rollback(bool endOfTrans = false)
 {
-    doRollback(*m_pObj);
+    if (m_endOfTrans) return;
+    m_endOfTrans = endOfTrans;
+    (endOfTrans) ? doRollback(std::move(m_bakObj)) : doRollback(m_bakObj);
 }
 
 template <typename T, typename Traits>
@@ -86,7 +93,7 @@ void Transaction<T, Traits>::doRollback(const T& obj)
 template <typename T, typename Traits>
 void Transaction<T, Traits>::createBackup()
 {
-    Traits::backup(m_obj, *m_pObj);
+    Traits::backup(m_obj, m_bakObj);
 }
 
 }
