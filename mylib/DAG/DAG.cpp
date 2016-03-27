@@ -10,7 +10,7 @@ DAG::DAG(const char * tableID)
 }
 
 DAG::~DAG() = default;
-DAG::DAG(DAG&&) = default;
+DAG::DAG(DAG&&) noexcept = default;
 DAG& DAG::operator=(DAG&&) = default;
 
 DAG::DAG(const DAG& rhs)
@@ -19,7 +19,10 @@ DAG::DAG(const DAG& rhs)
 
 DAG& DAG::operator=(const DAG& rhs)
 {
-  m_impl.reset(rhs.m_impl->clone());
+  if (this != &rhs) {
+    m_impl.reset(rhs.m_impl->clone());
+  }
+  return *this;
 }
 
 void DAG::_setValue(unsigned int row, unsigned int col, long val)

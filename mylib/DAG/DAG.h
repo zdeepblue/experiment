@@ -23,7 +23,7 @@ class DAG
     DAG& operator=(const DAG&);
 
     // move
-    DAG(DAG&&);
+    DAG(DAG&&) noexcept;
     DAG& operator = (DAG&&);
 
     template <typename T>
@@ -41,11 +41,6 @@ class DAG
 
     size_t getRowCount() const;
 
-    void swap(DAG& other)
-    {
-      std::swap(m_impl, other.m_impl);
-    }
-
   private:
     void _setValue(unsigned int row, unsigned int col, const std::string& val);
     void _setValue(unsigned int row, unsigned int col, long val);
@@ -54,11 +49,6 @@ class DAG
 
     std::unique_ptr<impl::IDAG> m_impl;
 };
-
-inline void swap(DAG& a, DAG& b) noexcept
-{
-  a.swap(b);
-}
 
 }
 

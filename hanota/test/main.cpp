@@ -17,7 +17,7 @@ int main()
 {
     cout << "test case 1:" << endl;
     int disc[] = {0, 1, 2};
-    int pilar[] = {0, 1, 2};
+    char pilar[] = {'A', 'B' , 'C'};
     hanota(disc, disc + 3, pilar[0], pilar[2], pilar[1], ::move());
 
     cout << "test case 2:" << endl;
