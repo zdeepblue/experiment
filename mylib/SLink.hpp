@@ -3,6 +3,7 @@
 
 #include <memory>
 #include <atomic>
+#include <utility>
 
 namespace hqw {
 
@@ -19,57 +20,64 @@ class SLink {
    };
 
    std::atomic<NodePtr> m_head;
+   std::atomic<size_t> m_length;
 
 public:
+
+   class Reference {
+         NodePtr node;
+         explicit Reference(NodePtr n)
+            : node(std::move(n)) {}
+         friend class SLink;
+      public:
+         bool hasValue() { return node != nullptr; }
+         T& operator () const { return *node.get(); }
+         T* operator & () const { return node.get(); }
+   };
+
    SLink()
+      : m_length(0)
    {}
 
    void push(const T& t);
 
-   T pop();
+   Reference pop();
 
    bool empty() const
    {
       return head == nullptr;
    }
 
-   size_t size() const;
+   size_t size() const
+   {
+      return m_length;
+   }
 
 };
 
 
 template <typename T>
-void SLink::push(const T& t)
+void SLink::push(T&& t)
 {
-   auto node = std::make_shared<Node>(t);
+   auto node = std::make_shared<Node>(std::forward<T>(t));
    node->next = head.load();
 
    while (!head.atomic_compare_exchange_weak(node->next, node))
    {}
+   ++m_length;
 }
 
 template <typename T>
-T pop()
+SLink<T>::Reference SLink<T>::pop()
 {
    auto node = head.load();
-   auto t = std::move(node->val);
 
-   while (!head.atomic_compare_exchange_weak(node, node->next))
-   {}
-
-   return t;
-}
-
-
-template <typename T>
-size_t size() const
-{
-   size_t len = 0;
-   auto node = head.load();
-   while (node != nullptr) {
-      ++len;
+   if (node != nullptr) {
+      while (!head.atomic_compare_exchange_weak(node, node->next))
+      {}
+      --m_length;
    }
-   return len;
+   return Reference(std::move(node));
 }
 
 }
