@@ -14,7 +14,7 @@ class SLink {
    using std::shared_ptr<Node> = NodePtr;
 
    struct Node {
-      explicit Node (const T& t) : val(t) {}
+      explicit Node (T&& t) : val(std::forward<T>(t)) {}
       T val;
       NodePtr next;
    };
@@ -23,6 +23,7 @@ class SLink {
    std::atomic<size_t> m_length;
 
 public:
+   using value_type = T;
 
    class Reference {
          NodePtr node;
@@ -39,7 +40,8 @@ public:
       : m_length(0)
    {}
 
-   void push(const T& t);
+   void push(T&& t);
+   void pushRef(Reference& t);
 
    Reference pop();
 
@@ -55,6 +57,16 @@ public:
 
 };
 
+template <typename T>
+void SLink::pushRef(Reference& t)
+{
+   auto node(t.node);
+   node->next = head.load();
+
+   while (!head.atomic_compare_exchange_weak(node->next, node))
+   {}
+   ++m_length;
+}
 
 template <typename T>
 void SLink::push(T&& t)
@@ -75,6 +87,7 @@ SLink<T>::Reference SLink<T>::pop()
    if (node != nullptr) {
       while (!head.atomic_compare_exchange_weak(node, node->next))
       {}
+      node->next.release();
       --m_length;
    }
    return Reference(std::move(node));
