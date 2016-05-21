@@ -14,7 +14,6 @@ namespace {
 struct LockFreeLock
 {
    void lock() {}
-
    void unlock() {}
 };
 
@@ -24,7 +23,7 @@ template <typename T>
 class MailSlot {
    public:
       MailSlot()
-         : m_quit(false), m_hasMail(false), m_mail(),
+         : m_quit(false), m_pMail(nullptr), m_mail(),
            m_worker(std::bind(MailSlot::workerLoop, this))
       {
       }
@@ -36,16 +35,11 @@ class MailSlot {
          m_worker.join();
       }
 
-      bool isEmpty() const
+      bool put(T t)
       {
-         return !m_hasMail;
-      }
-
-      bool put(T&& t)
-      {
-         if (!isEmpty()) return false;
-         m_mail = std::forward<T>(t);
-         m_hasMail = true;
+         if (m_pMail != nullptr) return false;
+         m_mail = std::move(t);
+         m_pMail = &m_mail;
          m_cvMail.notify_one();
          return true;
       }
@@ -53,7 +47,7 @@ class MailSlot {
       void workerLoop();
 
       std::atomic<bool> m_quit;
-      std::atomic<bool> m_hasMail;
+      std::atomic<T*> m_pMail;
       LockFreeLock m_lck;
       LockFreeCV m_cvMail;
       T m_mail;
@@ -64,14 +58,15 @@ template <typename T>
 MailSlot<T>::workerLoop()
 {
    while (true) {
-      m_cvMail.wait(m_lck, [this] () { return this->m_hasMail || this->m_quit;} );
-      if (m_quit && !m_hasMail) {
+      m_cvMail.wait(m_lck, [this] () { return this->m_pMail != nullptr || this->m_quit;} );
+      if (m_quit && m_pMail == nullptr) {
          break;
       }
       try {
          m_mail();
       } catch (...) {
       }
+      m_pMail = nullptr;
    }
 }
 
@@ -117,8 +112,8 @@ class MailDispatcher {
       void dispatchLoop();
 
       Queue& m_queue;
-      Slot* m_slots;
-      size_t m_size;
+      Slot* const m_slots;
+      const size_t m_size;
       std::atomic<Status> m_status;
       std::atomic<bool> m_quit;
       LockFreeLock m_lck;
@@ -131,7 +126,7 @@ template <typename Queue, typename Slot>
 MailDispatcher<Queue, Slot>::dispatchLoop()
 {
    while (true) {
-      m_cvStatus.wait(m_lck, [this] () {return this->m_status != STOPPED || m_quit; } );
+      m_cvStatus.wait(m_lck, [this] () {return this->m_status != STOPPED || this->m_quit; } );
       if (m_quit && m_status==STOPPED) {
          break;
       }
@@ -146,15 +141,12 @@ MailDispatcher<Queue, Slot>::dispatchLoop()
       }
       size_t i = 0;
       for (; i < m_size ; ++i) {
-         if (m_slots[i].isEmpty()) {
-            typename Queue::value_type tmp(*t);
-            if (m_slots[i].put(std::move(tmp))) {
-               break;
-            }
+         if (m_slots[i].put(*t)) {
+            break;
          }
       }
       if (i == m_size) {
-         m_queue.pushRef(std::move(t));
+         m_queue.push(std::move(t));
       }
    }
 }
@@ -175,7 +167,7 @@ class ThreadPool {
    private:
       const size_t MAX_QUEUE_SIZE;
 
-      SLink<T> m_queue;
+      SLink<T> m_inQueue;
       std::unique_ptr<MailSlot<T>[]> m_slots;
       using Dispatcher = MailDispatcher<SLink<T>, MailSlot<T>>;
       Dispatcher m_dispatcher;
@@ -186,7 +178,7 @@ template <typename T>
 ThreadPool<T>::ThreadPool(size_t queue_size, size_t pool_size)
    : MAX_QUEUE_SIZE((queue_size != 0) ? queue_size : DEFAULT_QUEUE_SIZE),
      m_slots(std::unique_ptr<MailSlot<T>[]>(new MailSlot<T>[POOL_SIZE(pool_size)])),
-     m_dispatcher(m_queue, m_slots.get(), POOL_SIZE(pool_size))
+     m_dispatcher(m_inQueue, m_slots.get(), POOL_SIZE(pool_size))
 {
    m_dispatcher.start();
 }
@@ -200,11 +192,11 @@ ThreadPool<T>::~ThreadPool()
 template <typename T>
 bool ThreadPool<T>::post(T&& t)
 {
-   if (m_queue.size() > MAX_QUEUE_SIZE) {
+   if (m_inQueue.size() > MAX_QUEUE_SIZE) {
       return false;
    }
 
-   m_queue.push(std::forward<T>(t));
+   m_inQueue.push(std::forward<T>(t));
    m_dispatcher.gotMail();
 
    return true;
