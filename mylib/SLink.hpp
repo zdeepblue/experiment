@@ -41,7 +41,7 @@ public:
    {}
 
    void push(T t);
-   void push(Reference& t);
+   void push(Reference t);
 
    Reference pop();
 
@@ -58,9 +58,9 @@ public:
 };
 
 template <typename T>
-void SLink<T>::push(Reference& t)
+void SLink<T>::push(Reference t)
 {
-   auto node(t.node);
+   auto node(std::move(t.node));
    node->next = std::atomic_load(&m_head);
 
    while (!std::atomic_compare_exchange_weak(&m_head, &node->next, node))

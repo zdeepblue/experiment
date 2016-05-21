@@ -7,7 +7,7 @@
 
 #include "SLink.hpp"
 
-#define POOL_SIZE(x) (x>0) ? (x) : std::thread::hardware_concurrency():
+#define POOL_SIZE(x) (x>0) ? (x) : std::thread::hardware_concurrency()
 
 namespace {
 
@@ -23,8 +23,8 @@ template <typename T>
 class MailSlot {
    public:
       MailSlot()
-         : m_quit(false), m_pMail(nullptr), m_mail(),
-           m_worker(std::bind(MailSlot::workerLoop, this))
+         : m_quit(false), m_pMail(nullptr),
+           m_worker(std::bind(&MailSlot::workerLoop, this))
       {
       }
 
@@ -55,7 +55,7 @@ class MailSlot {
 };
 
 template <typename T>
-MailSlot<T>::workerLoop()
+void MailSlot<T>::workerLoop()
 {
    while (true) {
       m_cvMail.wait(m_lck, [this] () { return this->m_pMail != nullptr || this->m_quit;} );
@@ -76,7 +76,7 @@ class MailDispatcher {
       enum Status { STOPPED, RUNNING, STOPPING };
 
       MailDispatcher(Queue& q, Slot* slots, size_t size)
-         : m_queue(q), m_slots(slots), m_size(size), m_status(STOPPED), m_quit(false)
+         : m_queue(q), m_slots(slots), m_size(size), m_status(STOPPED), m_quit(false),
            m_disp(std::bind(&MailDispatcher::dispatchLoop, this))
       {
       }
@@ -93,12 +93,14 @@ class MailDispatcher {
          if (m_status != RUNNING) return;
          m_status = STOPPING;
          m_cvQueue.notify_one();
+         m_cvStatus.notify_one();
       }
 
       void start()
       {
          if (m_status != STOPPED) return;
          m_status = RUNNING;
+         m_cvStatus.notify_one();
          m_cvQueue.notify_one();
       }
       
@@ -123,7 +125,7 @@ class MailDispatcher {
 };
 
 template <typename Queue, typename Slot>
-MailDispatcher<Queue, Slot>::dispatchLoop()
+void MailDispatcher<Queue, Slot>::dispatchLoop()
 {
    while (true) {
       m_cvStatus.wait(m_lck, [this] () {return this->m_status != STOPPED || this->m_quit; } );
@@ -159,10 +161,10 @@ template <typename T>
 class ThreadPool {
       static const size_t DEFAULT_QUEUE_SIZE = 20;
    public:
-      ThreadPool(size_t queue_size = DEFUALT_QUEUE_SIZE, size_t pool_size = 0);
+      ThreadPool(size_t queue_size = DEFAULT_QUEUE_SIZE, size_t pool_size = 0);
       ~ThreadPool();
 
-      bool post(T&& t);
+      bool post(T t);
 
    private:
       const size_t MAX_QUEUE_SIZE;
@@ -177,7 +179,7 @@ class ThreadPool {
 template <typename T>
 ThreadPool<T>::ThreadPool(size_t queue_size, size_t pool_size)
    : MAX_QUEUE_SIZE((queue_size != 0) ? queue_size : DEFAULT_QUEUE_SIZE),
-     m_slots(std::unique_ptr<MailSlot<T>[]>(new MailSlot<T>[POOL_SIZE(pool_size)])),
+     m_slots(new MailSlot<T>[POOL_SIZE(pool_size)]),
      m_dispatcher(m_inQueue, m_slots.get(), POOL_SIZE(pool_size))
 {
    m_dispatcher.start();
@@ -190,13 +192,13 @@ ThreadPool<T>::~ThreadPool()
 }
 
 template <typename T>
-bool ThreadPool<T>::post(T&& t)
+bool ThreadPool<T>::post(T t)
 {
    if (m_inQueue.size() > MAX_QUEUE_SIZE) {
       return false;
    }
 
-   m_inQueue.push(std::forward<T>(t));
+   m_inQueue.push(std::move(t));
    m_dispatcher.gotMail();
 
    return true;

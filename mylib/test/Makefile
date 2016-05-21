@@ -28,3 +28,4 @@ TestUnionFind.o: TestUnionFind.hpp ../union-find.hpp
 TestThreeSumZero.o: TestThreeSumZero.hpp ../ThreeSumZero.hpp
 TestSort.o: TestSort.hpp ../sort.hpp
 TestSLink.o: TestSLink.hpp ../SLink.hpp
+TestThreadPool.o: TestThreadPool.hpp ../ThreadPool.hpp
