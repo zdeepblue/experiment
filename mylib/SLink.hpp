@@ -11,7 +11,7 @@ template <typename T>
 class SLink {
 
    struct Node;
-   using std::shared_ptr<Node> = NodePtr;
+   using NodePtr = std::shared_ptr<Node>;
 
    struct Node {
       explicit Node (T&& t) : val(std::forward<T>(t)) {}
@@ -19,7 +19,7 @@ class SLink {
       NodePtr next;
    };
 
-   std::atomic<NodePtr> m_head;
+   NodePtr m_head;
    std::atomic<size_t> m_length;
 
 public:
@@ -32,22 +32,22 @@ public:
          friend class SLink;
       public:
          bool hasValue() { return node != nullptr; }
-         T& operator () const { return *node.get(); }
-         T* operator & () const { return node.get(); }
+         T& operator * () const { return node->val;}
+         T* operator -> () const { return &node->val; }
    };
 
    SLink()
       : m_length(0)
    {}
 
-   void push(T&& t);
-   void pushRef(Reference& t);
+   void push(T t);
+   void push(Reference& t);
 
    Reference pop();
 
    bool empty() const
    {
-      return head == nullptr;
+      return std::atomic_load(&m_head) == nullptr;
    }
 
    size_t size() const
@@ -58,38 +58,36 @@ public:
 };
 
 template <typename T>
-void SLink::pushRef(Reference& t)
+void SLink<T>::push(Reference& t)
 {
    auto node(t.node);
-   node->next = head.load();
+   node->next = std::atomic_load(&m_head);
 
-   while (!head.atomic_compare_exchange_weak(node->next, node))
+   while (!std::atomic_compare_exchange_weak(&m_head, &node->next, node))
    {}
    ++m_length;
 }
 
 template <typename T>
-void SLink::push(T&& t)
+void SLink<T>::push(T t)
 {
-   auto node = std::make_shared<Node>(std::forward<T>(t));
-   node->next = head.load();
+   auto node = std::make_shared<Node>(std::move(t));
+   node->next = std::atomic_load(&m_head);
 
-   while (!head.atomic_compare_exchange_weak(node->next, node))
+   while (!std::atomic_compare_exchange_weak(&m_head, &node->next, node))
    {}
    ++m_length;
 }
 
 template <typename T>
-SLink<T>::Reference SLink<T>::pop()
+typename SLink<T>::Reference SLink<T>::pop()
 {
-   auto node = head.load();
+   auto node = std::atomic_load(&m_head);
 
-   if (node != nullptr) {
-      while (!head.atomic_compare_exchange_weak(node, node->next))
-      {}
-      node->next.release();
-      --m_length;
-   }
+   while (node != nullptr &&
+          !std::atomic_compare_exchange_weak(&m_head, &node, node->next))
+   {}
+   if (node != nullptr) --m_length;
    return Reference(std::move(node));
 }
 

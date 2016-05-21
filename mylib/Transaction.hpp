@@ -25,8 +25,8 @@ public:
     Transaction(T& obj);
     ~Transaction();
 
-    void commit(bool);
-    void rollback(bool);
+    void commit(bool endOfTrans=false);
+    void rollback(bool endOfTrans=false);
 
 private:
 
@@ -62,7 +62,7 @@ Transaction<T, Traits>::~Transaction()
 }
 
 template <typename T, typename Traits>
-void Transaction<T, Traits>::commit(bool endOfTrans = false)
+void Transaction<T, Traits>::commit(bool endOfTrans)
 {
     if (m_endOfTrans) return;
     m_endOfTrans = endOfTrans;
@@ -71,7 +71,7 @@ void Transaction<T, Traits>::commit(bool endOfTrans = false)
 
 
 template <typename T, typename Traits>
-void Transaction<T, Traits>::rollback(bool endOfTrans = false)
+void Transaction<T, Traits>::rollback(bool endOfTrans)
 {
     if (m_endOfTrans) return;
     m_endOfTrans = endOfTrans;

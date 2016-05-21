@@ -2,6 +2,7 @@
 #define HQW_THREADPOOL_HPP
 
 #include <thread>
+#include <atomic>
 #include <condition_variable>
 
 #include "SLink.hpp"
@@ -42,15 +43,18 @@ class MailSlot {
 
       bool put(T&& t)
       {
+         if (!isEmpty()) return false;
          m_mail = std::forward<T>(t);
          m_hasMail = true;
          m_cvMail.notify_one();
+         return true;
       }
    private:
       void workerLoop();
 
       std::atomic<bool> m_quit;
       std::atomic<bool> m_hasMail;
+      LockFreeLock m_lck;
       LockFreeCV m_cvMail;
       T m_mail;
       std::thread m_worker;
@@ -61,7 +65,7 @@ MailSlot<T>::workerLoop()
 {
    while (true) {
       m_cvMail.wait(m_lck, [this] () { return this->m_hasMail || this->m_quit;} );
-      if (m_quit) {
+      if (m_quit && !m_hasMail) {
          break;
       }
       try {
@@ -103,11 +107,6 @@ class MailDispatcher {
          m_cvQueue.notify_one();
       }
       
-      Status getStatus() const
-      {
-         return m_status;
-      }
-
       void gotMail()
       {
          m_cvQueue.notify_one();
@@ -133,7 +132,7 @@ MailDispatcher<Queue, Slot>::dispatchLoop()
 {
    while (true) {
       m_cvStatus.wait(m_lck, [this] () {return this->m_status != STOPPED || m_quit; } );
-      if (m_quit) {
+      if (m_quit && m_status==STOPPED) {
          break;
       }
 
@@ -148,9 +147,10 @@ MailDispatcher<Queue, Slot>::dispatchLoop()
       size_t i = 0;
       for (; i < m_size ; ++i) {
          if (m_slots[i].isEmpty()) {
-            typename Queue::value_type tmp(t);
-            m_slots[i].put(std::move(tmp));
-            break;
+            typename Queue::value_type tmp(*t);
+            if (m_slots[i].put(std::move(tmp))) {
+               break;
+            }
          }
       }
       if (i == m_size) {
@@ -165,14 +165,15 @@ namespace hqw {
 
 template <typename T>
 class ThreadPool {
+      static const size_t DEFAULT_QUEUE_SIZE = 20;
    public:
-      explicit ThreadPool(size_t size = 0);
+      ThreadPool(size_t queue_size = DEFUALT_QUEUE_SIZE, size_t pool_size = 0);
       ~ThreadPool();
 
       bool post(T&& t);
 
    private:
-      static const size_t MAX_QUEUE_SIZE = 20;
+      const size_t MAX_QUEUE_SIZE;
 
       SLink<T> m_queue;
       std::unique_ptr<MailSlot<T>[]> m_slots;
@@ -182,9 +183,10 @@ class ThreadPool {
 
 
 template <typename T>
-ThreadPool<T>::ThreadPool(size_t size)
-   : m_slots(std::unique_ptr<MailSlot<T>[]>(new MailSlot<T>[POOL_SIZE(size)])),
-     m_dispatcher(m_queue, m_slots.get(), POOL_SIZE(size))
+ThreadPool<T>::ThreadPool(size_t queue_size, size_t pool_size)
+   : MAX_QUEUE_SIZE((queue_size != 0) ? queue_size : DEFAULT_QUEUE_SIZE),
+     m_slots(std::unique_ptr<MailSlot<T>[]>(new MailSlot<T>[POOL_SIZE(pool_size)])),
+     m_dispatcher(m_queue, m_slots.get(), POOL_SIZE(pool_size))
 {
    m_dispatcher.start();
 }
@@ -198,8 +200,7 @@ ThreadPool<T>::~ThreadPool()
 template <typename T>
 bool ThreadPool<T>::post(T&& t)
 {
-   if (m_dispatcher.getStatus() != Dispatcher::RUNNING ||
-       m_queue.size() > MAX_QUEUE_SIZE) {
+   if (m_queue.size() > MAX_QUEUE_SIZE) {
       return false;
    }
 
