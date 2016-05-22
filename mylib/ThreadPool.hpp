@@ -22,8 +22,11 @@ using LockFreeCV = std::condition_variable_any;
 template <typename T>
 class MailSlot {
    public:
+
+      using value_type = T;
       MailSlot()
-         : m_quit(false), m_pMail(nullptr),
+         : m_quit(false),
+           m_pvSlots(nullptr), m_cvSlots(nullptr),
            m_worker(std::bind(&MailSlot::workerLoop, this))
       {
       }
@@ -35,21 +38,35 @@ class MailSlot {
          m_worker.join();
       }
 
+      void init(std::atomic<size_t> *pv, LockFreeCV *cv)
+      {
+        m_pvSlots = pv;
+        m_cvSlots = cv;
+      }
+
+      bool empty() const
+      {
+         return std::atomic_load(&m_mail)==nullptr;
+      }
+
       bool put(T t)
       {
-         if (m_pMail != nullptr) return false;
-         m_mail = std::move(t);
-         m_pMail = &m_mail;
-         m_cvMail.notify_one();
-         return true;
+         decltype(m_mail) nul;
+         if (std::atomic_compare_exchange_weak(&m_mail, &nul, t)) {
+            --(*m_pvSlots);
+            m_cvMail.notify_one();
+            return true;
+         }
+         return false;
       }
    private:
       void workerLoop();
 
-      std::atomic<bool> m_quit;
-      std::atomic<T*> m_pMail;
+      volatile std::atomic<bool> m_quit;
+      std::atomic<size_t> *m_pvSlots;
       LockFreeLock m_lck;
       LockFreeCV m_cvMail;
+      LockFreeCV *m_cvSlots;
       T m_mail;
       std::thread m_worker;
 };
@@ -58,50 +75,93 @@ template <typename T>
 void MailSlot<T>::workerLoop()
 {
    while (true) {
-      m_cvMail.wait(m_lck, [this] () { return this->m_pMail != nullptr || this->m_quit;} );
-      if (m_quit && m_pMail == nullptr) {
+      decltype(m_mail) p;
+      m_cvMail.wait(m_lck, [this, &p] () { return (p=std::atomic_load(&this->m_mail)) != nullptr || this->m_quit;} );
+      if (m_quit && p == nullptr) {
          break;
       }
       try {
-         m_mail();
+         (p->val)();
       } catch (...) {
       }
-      m_pMail = nullptr;
+      ++(*m_pvSlots);
+      while (!std::atomic_compare_exchange_weak(&m_mail, &p, T()))
+      {}
+      m_cvSlots->notify_one();
    }
 }
 
-template <typename Queue, typename Slot>
+template <typename Slot>
+class MailSlots
+{
+   public:
+      explicit MailSlots(size_t size)
+         : m_pv(size), m_size(size), m_slots(new Slot[size])
+      {
+         for (size_t i = 0 ; i < m_size ; ++i) {
+            m_slots[i].init(&m_pv, &m_cvSlots);
+         }
+      }
+
+      bool select(const typename Slot::value_type& t);
+
+   private:
+      LockFreeLock m_lck;
+      LockFreeCV m_cvSlots;
+      std::atomic<size_t> m_pv;
+      const size_t m_size;
+      std::unique_ptr<Slot[]> m_slots;
+};
+
+template <typename Slot>
+bool MailSlots<Slot>::select(const typename Slot::value_type& t)
+{
+   m_cvSlots.wait(m_lck, [this] () { return this->m_pv > 0;} );
+   size_t i = 0;
+   for (; i < m_size ; ++i) {
+      if (m_slots[i].empty() && m_slots[i].put(t)) {
+         break;
+      }
+   }
+   return (i != m_size);
+}
+
+template <typename Queue, typename Slots>
 class MailDispatcher {
    public:
       enum Status { STOPPED, RUNNING, STOPPING };
 
-      MailDispatcher(Queue& q, Slot* slots, size_t size)
-         : m_queue(q), m_slots(slots), m_size(size), m_status(STOPPED), m_quit(false),
-           m_disp(std::bind(&MailDispatcher::dispatchLoop, this))
+      MailDispatcher(Queue& q, Slots& slots)
+         : m_queue(q), m_slots(slots), m_status(STOPPED), m_quit(false),
+           m_disp(std::thread(std::bind(&MailDispatcher::dispatchLoop, this)))
       {
       }
 
       ~MailDispatcher()
       {
-         stop();
          m_quit = true;
+         stop();
+         m_cvStatus.notify_one();
+         m_cvQueue.notify_one();
          m_disp.join();
       }
 
       void stop()
       {
-         if (m_status != RUNNING) return;
-         m_status = STOPPING;
-         m_cvQueue.notify_one();
-         m_cvStatus.notify_one();
+         auto s = RUNNING;
+         if (m_status.compare_exchange_weak(s, STOPPING)) {
+            m_cvQueue.notify_one();
+            m_cvStatus.notify_one();
+         }
       }
 
       void start()
       {
-         if (m_status != STOPPED) return;
-         m_status = RUNNING;
-         m_cvStatus.notify_one();
-         m_cvQueue.notify_one();
+         auto s = STOPPED;
+         if (m_status.compare_exchange_weak(s, RUNNING)) {
+            m_cvStatus.notify_one();
+            m_cvQueue.notify_one();
+         }
       }
       
       void gotMail()
@@ -114,42 +174,33 @@ class MailDispatcher {
       void dispatchLoop();
 
       Queue& m_queue;
-      Slot* const m_slots;
-      const size_t m_size;
+      Slots& m_slots;
       std::atomic<Status> m_status;
-      std::atomic<bool> m_quit;
+      volatile std::atomic<bool> m_quit;
       LockFreeLock m_lck;
       LockFreeCV m_cvQueue;
       LockFreeCV m_cvStatus;
       std::thread m_disp;
 };
 
-template <typename Queue, typename Slot>
-void MailDispatcher<Queue, Slot>::dispatchLoop()
+template <typename Queue, typename Slots>
+void MailDispatcher<Queue, Slots>::dispatchLoop()
 {
    while (true) {
-      m_cvStatus.wait(m_lck, [this] () {return this->m_status != STOPPED || this->m_quit; } );
-      if (m_quit && m_status==STOPPED) {
+      Status s = STOPPED;
+      m_cvStatus.wait(m_lck, [this, &s] () {return (s=this->m_status) != STOPPED || this->m_quit; } );
+      if (m_quit && s==STOPPED) {
          break;
       }
 
       m_cvQueue.wait(m_lck, [this] () {return !this->m_queue.empty() || this->m_status==STOPPING;} );
       auto t = m_queue.pop();
       if (!t.hasValue()) {
-         if (m_status == STOPPING) {
-            m_status = STOPPED;
-         }
+         s = STOPPING;
+         m_status.compare_exchange_weak(s, STOPPED);
          continue;
       }
-      size_t i = 0;
-      for (; i < m_size ; ++i) {
-         if (m_slots[i].put(*t)) {
-            break;
-         }
-      }
-      if (i == m_size) {
-         m_queue.push(std::move(t));
-      }
+      while (!m_slots.select(t.getValue())) {}
    }
 }
 
@@ -170,8 +221,9 @@ class ThreadPool {
       const size_t MAX_QUEUE_SIZE;
 
       SLink<T> m_inQueue;
-      std::unique_ptr<MailSlot<T>[]> m_slots;
-      using Dispatcher = MailDispatcher<SLink<T>, MailSlot<T>>;
+      using Slots = MailSlots<MailSlot<typename SLink<T>::NodePtr>>;
+      Slots m_slots;
+      using Dispatcher = MailDispatcher<SLink<T>, Slots>;
       Dispatcher m_dispatcher;
 };
 
@@ -179,8 +231,8 @@ class ThreadPool {
 template <typename T>
 ThreadPool<T>::ThreadPool(size_t queue_size, size_t pool_size)
    : MAX_QUEUE_SIZE((queue_size != 0) ? queue_size : DEFAULT_QUEUE_SIZE),
-     m_slots(new MailSlot<T>[POOL_SIZE(pool_size)]),
-     m_dispatcher(m_inQueue, m_slots.get(), POOL_SIZE(pool_size))
+     m_slots(POOL_SIZE(pool_size)),
+     m_dispatcher(m_inQueue, m_slots)
 {
    m_dispatcher.start();
 }

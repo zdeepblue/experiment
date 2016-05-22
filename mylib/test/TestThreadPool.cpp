@@ -7,7 +7,7 @@
 using namespace hqw;
 using namespace std;
 
-#define DATA_PER_PROD 100
+#define DATA_PER_PROD 1000
 #define NUM_PROD 10
 
 void TestThreadPool::testPool()
@@ -20,7 +20,7 @@ void TestThreadPool::testPool()
    auto f = [&data] (int id) { ++data[id]; };
 
    {
-      ThreadPool<function<void ()>> pool;
+      ThreadPool<function<void ()>> pool(100, 8);
 
       vector<thread> prods;
       prods.reserve(NUM_PROD);

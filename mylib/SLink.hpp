@@ -10,6 +10,7 @@ namespace hqw {
 template <typename T>
 class SLink {
 
+public:
    struct Node;
    using NodePtr = std::shared_ptr<Node>;
 
@@ -19,10 +20,6 @@ class SLink {
       NodePtr next;
    };
 
-   NodePtr m_head;
-   std::atomic<size_t> m_length;
-
-public:
    using value_type = T;
 
    class Reference {
@@ -32,6 +29,7 @@ public:
          friend class SLink;
       public:
          bool hasValue() { return node != nullptr; }
+         NodePtr getValue() const { return node; }
          T& operator * () const { return node->val;}
          T* operator -> () const { return &node->val; }
    };
@@ -54,6 +52,10 @@ public:
    {
       return m_length;
    }
+
+private:
+   NodePtr m_head;
+   std::atomic<size_t> m_length;
 
 };
 
