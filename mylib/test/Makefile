@@ -1,9 +1,9 @@
-SKIPPED_SRC=$(wildcard TestDAG*.cpp)
+#SKIPPED_SRC=$(wildcard TestDAG*.cpp)
 SRC=$(filter-out $(SKIPPED_SRC), $(wildcard *.cpp))
 OBJ=$(patsubst %.cpp,%.o,$(SRC))
-CXXFLAGS+=-I. -I.. -I../DAG -I/Users/huangqiwei/workspace/cppunit/include -I/usr/local/include
+CXXFLAGS+=-I. -I.. -I../DAG -I/usr/local/include
 CXXFLAGS+=--std=c++1y -g -O2
-LDLIBS=-L/Users/huangqiwei/workspace/cppunit/lib -L/usr/lib -lcppunit 
+LDLIBS=-L/usr/local/lib -L/usr/lib -lcppunit -lstdc++
 OBJDEP=../Node.o ../DAG/DAG.o
 
 all: runtest
