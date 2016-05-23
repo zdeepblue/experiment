@@ -9,18 +9,19 @@ using namespace std;
 
 #define DATA_PER_PROD 1000
 #define NUM_PROD 10
+#define EXP_VALUE 100
 
 void TestThreadPool::testPool()
 {
-   array<atomic<int>, DATA_PER_PROD * NUM_PROD> data; 
+   array<int, DATA_PER_PROD * NUM_PROD> data; 
    for (auto & i : data) {
       i = 0;
    }
 
-   auto f = [&data] (int id) { ++data[id]; };
+   auto f = [&data] (int id) { int i = EXP_VALUE; while(i-- > 0) ++data[id]; };
 
    {
-      ThreadPool<function<void ()>> pool(100, 8);
+      ThreadPool<function<void ()>> pool(100);
 
       vector<thread> prods;
       prods.reserve(NUM_PROD);
@@ -38,7 +39,7 @@ void TestThreadPool::testPool()
       }
    }
    for (auto &i : data) {
-      CPPUNIT_ASSERT(i == 1);
+      CPPUNIT_ASSERT(i == EXP_VALUE);
    }
 }
 
