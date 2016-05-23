@@ -7,21 +7,26 @@
 using namespace hqw;
 using namespace std;
 
-#define DATA_PER_PROD 1000
+#define DATA_PER_PROD 10000
 #define NUM_PROD 10
-#define EXP_VALUE 100
+#define EXP_VALUE 128
 
 void TestThreadPool::testPool()
 {
-   array<int, DATA_PER_PROD * NUM_PROD> data; 
-   for (auto & i : data) {
+   auto data = new array<int, DATA_PER_PROD * NUM_PROD>();
+   for (auto & i : *data) {
       i = 0;
    }
 
-   auto f = [&data] (int id) { int i = EXP_VALUE; while(i-- > 0) ++data[id]; };
+   auto f = [data] (int id) {
+               int i = EXP_VALUE;
+               while(i-- > 0) {
+                  ++(*data)[id];
+               }
+            };
 
    {
-      ThreadPool<function<void ()>> pool(100);
+      ThreadPool<function<void ()>> pool;
 
       vector<thread> prods;
       prods.reserve(NUM_PROD);
@@ -38,7 +43,7 @@ void TestThreadPool::testPool()
          t.join();
       }
    }
-   for (auto &i : data) {
+   for (auto &i : *data) {
       CPPUNIT_ASSERT(i == EXP_VALUE);
    }
 }

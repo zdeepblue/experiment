@@ -77,10 +77,13 @@ void MailSlot<T>::workerLoop()
    while (true) {
       decltype(m_mail) p;
       bool quit = false;
-      m_cvMail.wait(m_lck, [this, &p, &quit] () {
-               return (p=std::atomic_load(&this->m_mail)) != nullptr ||
-                      (quit=this->m_quit);
-            });
+      while (!m_cvMail.wait_for(m_lck, std::chrono::milliseconds(100),
+                        [this, &p, &quit] () {
+                           return (p=std::atomic_load(&this->m_mail)) != nullptr ||
+                                  (quit=this->m_quit);
+                        }))
+      {}
+
       if (quit) {
          break;
       }
@@ -105,17 +108,20 @@ class MailSlots
          for (size_t i = 0 ; i < m_size ; ++i) {
             m_slots[i].init(&m_pv, &m_cvSlots);
          }
-         m_pred = [this] () { return this->m_pv > 0;};
       }
 
-      void waitForEmptySlot(size_t ms = 0)
+      bool waitForEmptySlot(size_t ms = 0)
       {
+         auto hasEmptySlot = false;
+         auto pred = [this] () { return this->m_pv > 0;};
          if (ms == 0) {
-            m_cvSlots.wait(m_lck, m_pred);
+            m_cvSlots.wait(m_lck, std::move(pred));
+            hasEmptySlot = true;
          } else {
-            m_cvSlots.wait_for(m_lck, std::chrono::milliseconds(ms), m_pred);
+            hasEmptySlot = m_cvSlots.wait_for(m_lck, std::chrono::milliseconds(ms),
+                                              std::move(pred));
          }
-         
+         return hasEmptySlot;
       }
       bool select(const typename Slot::value_type& t);
 
@@ -124,7 +130,6 @@ class MailSlots
       LockFreeCV m_cvSlots;
       std::atomic<size_t> m_pv;
       const size_t m_size;
-      std::function<bool()> m_pred;
       std::unique_ptr<Slot[]> m_slots;
 };
 
@@ -142,6 +147,7 @@ bool MailSlots<Slot>::select(const typename Slot::value_type& t)
 
 template <typename Queue, typename Slots>
 class MailDispatcher {
+      static const size_t timeout_ms;
    public:
       MailDispatcher(Queue& q, Slots& slots)
          : m_queue(q), m_slots(slots), m_quit(false),
@@ -174,11 +180,19 @@ class MailDispatcher {
 };
 
 template <typename Queue, typename Slots>
+const size_t MailDispatcher<Queue, Slots>::timeout_ms {10};
+
+template <typename Queue, typename Slots>
 void MailDispatcher<Queue, Slots>::dispatchLoop()
 {
    while (true) {
       bool quit = false;
-      m_cvQueue.wait(m_lck, [this, &quit] () {return !this->m_queue.empty() || (quit=this->m_quit);} );
+      while (!m_cvQueue.wait_for(m_lck, std::chrono::milliseconds(timeout_ms),
+                         [this, &quit] () {
+                            return !this->m_queue.empty() || (quit=this->m_quit);
+                         }))
+      {}
+
       if (quit) {
          break;
       }
@@ -186,10 +200,8 @@ void MailDispatcher<Queue, Slots>::dispatchLoop()
       if (!t.hasValue()) {
          continue;
       }
-      m_slots.waitForEmptySlot(1);
-      while (!m_slots.select(t.getValue())) {
-         m_slots.waitForEmptySlot(1);
-      }
+      while (m_slots.waitForEmptySlot(timeout_ms) && !m_slots.select(t.getValue()))
+      {}
    }
 }
 
@@ -199,7 +211,7 @@ namespace hqw {
 
 template <typename T>
 class ThreadPool {
-      static const size_t DEFAULT_QUEUE_SIZE = 20;
+      static const size_t DEFAULT_QUEUE_SIZE;
    public:
       ThreadPool(size_t queue_size = DEFAULT_QUEUE_SIZE, size_t pool_size = 0);
       ~ThreadPool();
@@ -216,6 +228,9 @@ class ThreadPool {
       Dispatcher m_dispatcher;
 };
 
+
+template <typename T>
+const size_t ThreadPool<T>::DEFAULT_QUEUE_SIZE {32};
 
 template <typename T>
 ThreadPool<T>::ThreadPool(size_t queue_size, size_t pool_size)
