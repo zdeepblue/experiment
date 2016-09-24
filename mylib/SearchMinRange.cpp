@@ -21,7 +21,10 @@ std::pair<Iter, Iter> searchMinRange(Iter beg, Iter end,
          }
       }
    }
-   // TODO check if all elem in pat are found
+   // check if all elem in pat are found
+   for (auto e : pos) {
+      if (e.empty()) return make_pair(beg, beg);
+   }
 
    offset = 0;
    decltype(offset) minRangeLen = -1;
@@ -54,10 +57,14 @@ std::pair<Iter, Iter> searchMinRange(Iter beg, Iter end,
 
 #include <iostream>
 using namespace std;
-int main()
+int main(int argc, char * argv[])
 {
-   string str = "abcdssfrghsslg[ieneeb";
-   string pat = "se";
+   if (argc != 3) {
+      cerr << "Usage: "  << argv[0] << " <string of text> <search pattern>" << endl;
+      return -1;
+   }
+   string str(argv[1]);
+   string pat(argv[2]);
 
    auto ret = searchMinRange(begin(str), end(str), begin(pat), end(pat));
    cout << "min range of '" << str << "' contains '" << pat
