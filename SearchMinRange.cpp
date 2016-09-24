@@ -2,6 +2,7 @@
 #include <iterator>
 #include <deque>
 #include <vector>
+#include <limits>
 
 template <typename Iter, typename Iter2>
 std::pair<Iter, Iter> searchMinRange(Iter beg, Iter end,
@@ -27,11 +28,11 @@ std::pair<Iter, Iter> searchMinRange(Iter beg, Iter end,
    }
 
    offset = 0;
-   decltype(offset) minRangeLen = -1;
+   offset_t minRangeLen = numeric_limits<offset_t>::max();
    auto minRange = make_pair<offset_t, offset_t>(0, 0);
    do {
-      offset_t minOffset = -1;
-      offset_t maxOffset = 0;
+      offset_t minOffset = numeric_limits<offset_t>::max();
+      offset_t maxOffset = numeric_limits<offset_t>::min();
       auto minElem = 0;
       for (int i = 0 ; i < pos.size() ; ++i) {
          auto o = pos[i].front();
