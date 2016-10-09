@@ -9,22 +9,38 @@ std::pair<Iter, Iter> searchMinRange(Iter beg, Iter end,
                                      Iter2 pBeg, Iter2 pEnd)
 {
    using namespace std;
-   size_t offset = 0;
+   long offset = 0;
    using offset_t = decltype(offset);
 
-   vector<deque<decltype(offset)>> pos(distance(pBeg, pEnd));
+   vector<pair<deque<decltype(offset)>, int>> pos(distance(pBeg, pEnd));
 
    for (auto e = beg ; e != end ; ++e, ++offset) {
       auto i = 0;
+      auto addedPos = 0;
       for (auto t = pBeg ; t != pEnd ; ++t, ++i) {
          if (*t == *e) {
-            pos[i].push_back(offset);
+            if (addedPos > 0) {
+               // there is duplicated elem in pattern
+               // put the index +1 of first same elem
+               // in the offset queue and only once.
+               if (pos[i].first.empty()) {
+                  pos[i].first.push_back(-addedPos);
+                  pos[addedPos-1].second++;
+               }
+            } else {
+               pos[i].first.push_back(offset);
+               if (pos[i].second == 0) {
+                  pos[i].second = 1;
+               }
+               // +1 to avoid conflict with offset 0
+               addedPos = i+1;
+            }
          }
       }
    }
    // check if all elem in pat are found
-   for (auto e : pos) {
-      if (e.empty()) return make_pair(beg, beg);
+   for (auto& e : pos) {
+      if (e.first.empty()) return make_pair(beg, beg);
    }
 
    offset = 0;
@@ -35,12 +51,22 @@ std::pair<Iter, Iter> searchMinRange(Iter beg, Iter end,
       offset_t maxOffset = numeric_limits<offset_t>::min();
       auto minElem = 0;
       for (int i = 0 ; i < pos.size() ; ++i) {
-         auto o = pos[i].front();
-         if (o > maxOffset) maxOffset = o;
-         if (o < minOffset) {
-            minOffset = o;
-            minElem = i;
+         auto o = pos[i].first.front();
+         if (o < 0) {
+            continue;
          }
+         auto count = 0;
+         do {
+            if (o > maxOffset) maxOffset = o;
+            if (o < minOffset) {
+               minOffset = o;
+               minElem = i;
+            }
+            ++count;
+            if (count < pos[i].second) {
+               o = pos[i].first[count];
+            }
+         } while (count < pos[i].second);
       }
       auto rangeLen = maxOffset - minOffset + 1;
       if (rangeLen < minRangeLen) {
@@ -49,8 +75,8 @@ std::pair<Iter, Iter> searchMinRange(Iter beg, Iter end,
          minRange.second = maxOffset;
          if (rangeLen == pos.size()) break;
       }
-      pos[minElem].pop_front();
-      if (pos[minElem].empty()) break;
+      pos[minElem].first.pop_front();
+      if (pos[minElem].first.empty()) break;
    } while (true);
    return make_pair<Iter, Iter>(next(beg, minRange.first),
                                 next(beg, minRange.second+1));
