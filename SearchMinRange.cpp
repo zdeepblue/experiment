@@ -9,7 +9,7 @@ std::pair<Iter, Iter> searchMinRange(Iter beg, Iter end,
                                      Iter2 pBeg, Iter2 pEnd)
 {
    using namespace std;
-   long offset = 0;
+   size_t offset = 0;
    using offset_t = decltype(offset);
 
    vector<pair<deque<decltype(offset)>, int>> pos(distance(pBeg, pEnd));
@@ -21,10 +21,8 @@ std::pair<Iter, Iter> searchMinRange(Iter beg, Iter end,
          if (*t == *e) {
             if (addedPos > 0) {
                // there is duplicated elem in pattern
-               // put the index +1 of first same elem
-               // in the offset queue and only once.
-               if (pos[i].first.empty()) {
-                  pos[i].first.push_back(-addedPos);
+               if (pos[i].second == 0) {
+                  pos[i].second = -1;
                   pos[addedPos-1].second++;
                }
             } else {
@@ -40,7 +38,7 @@ std::pair<Iter, Iter> searchMinRange(Iter beg, Iter end,
    }
    // check if all elem in pat are found
    for (auto& e : pos) {
-      if (e.first.empty()) return make_pair(beg, beg);
+      if (e.second == 0) return make_pair(beg, beg);
    }
 
    offset = 0;
@@ -51,22 +49,14 @@ std::pair<Iter, Iter> searchMinRange(Iter beg, Iter end,
       offset_t maxOffset = numeric_limits<offset_t>::min();
       auto minElem = 0;
       for (int i = 0 ; i < pos.size() ; ++i) {
-         auto o = pos[i].first.front();
-         if (o < 0) {
-            continue;
-         }
-         auto count = 0;
-         do {
+         for (auto count = 0 ; count < pos[i].second ; ++count) {
+            auto o = pos[i].first[count];
             if (o > maxOffset) maxOffset = o;
             if (o < minOffset) {
                minOffset = o;
                minElem = i;
             }
-            ++count;
-            if (count < pos[i].second) {
-               o = pos[i].first[count];
-            }
-         } while (count < pos[i].second);
+         }
       }
       auto rangeLen = maxOffset - minOffset + 1;
       if (rangeLen < minRangeLen) {
