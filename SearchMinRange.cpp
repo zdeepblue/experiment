@@ -30,7 +30,7 @@ std::pair<Iter, Iter> searchMinRange(Iter beg, Iter end,
                if (pos[i].second == 0) {
                   pos[i].second = 1;
                }
-               // +1 to avoid conflict with offset 0
+               // +1 to avoid conflict with init value 0
                addedPos = i+1;
             }
          }
@@ -38,7 +38,7 @@ std::pair<Iter, Iter> searchMinRange(Iter beg, Iter end,
    }
    // check if all elem in pat are found
    for (auto& e : pos) {
-      if (e.second == 0) return make_pair(beg, beg);
+      if (e.second == 0 || e.second > 0 && e.first.size() < e.second) return make_pair(beg, beg);
    }
 
    offset = 0;
@@ -48,7 +48,7 @@ std::pair<Iter, Iter> searchMinRange(Iter beg, Iter end,
       offset_t minOffset = numeric_limits<offset_t>::max();
       offset_t maxOffset = numeric_limits<offset_t>::min();
       auto minElem = 0;
-      for (int i = 0 ; i < pos.size() ; ++i) {
+      for (auto i = 0 ; i < pos.size() ; ++i) {
          for (auto count = 0 ; count < pos[i].second ; ++count) {
             auto o = pos[i].first[count];
             if (o > maxOffset) maxOffset = o;
