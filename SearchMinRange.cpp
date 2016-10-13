@@ -3,6 +3,7 @@
 #include <deque>
 #include <vector>
 #include <limits>
+#include <queue>
 
 template <typename Iter, typename Iter2>
 std::pair<Iter, Iter> searchMinRange(Iter beg, Iter end,
@@ -41,32 +42,42 @@ std::pair<Iter, Iter> searchMinRange(Iter beg, Iter end,
       if (e.second == 0 || e.second > 0 && e.first.size() < e.second) return make_pair(beg, beg);
    }
 
-   offset = 0;
    offset_t minRangeLen = numeric_limits<offset_t>::max();
    auto minRange = make_pair<offset_t, offset_t>(0, 0);
+   auto firstComeIn = true;
+   using rangeElem = pair<offset_t, offset_t>;
+   auto compPri = [] (rangeElem& e1, rangeElem& e2) {
+                      return e1.first > e2.first;
+                  };
+   priority_queue<rangeElem, vector<rangeElem>, decltype(compPri)> range(compPri);
+   offset_t maxOffset = numeric_limits<offset_t>::min();
    do {
-      offset_t minOffset = numeric_limits<offset_t>::max();
-      offset_t maxOffset = numeric_limits<offset_t>::min();
-      auto minElem = 0;
-      for (auto i = 0 ; i < pos.size() ; ++i) {
-         for (auto count = 0 ; count < pos[i].second ; ++count) {
-            auto o = pos[i].first[count];
-            if (o > maxOffset) maxOffset = o;
-            if (o < minOffset) {
-               minOffset = o;
-               minElem = i;
+      if (firstComeIn) {
+         // build priority queue
+         for (auto i = 0 ; i < pos.size() ; ++i) {
+            for (auto count = 0 ; count < pos[i].second ; ++count) {
+               auto o = pos[i].first.front();
+               pos[i].first.pop_front();
+               if (o > maxOffset) maxOffset = o;
+               range.push(make_pair(o, i));
             }
          }
+         firstComeIn = false;
       }
-      auto rangeLen = maxOffset - minOffset + 1;
+      auto minElem = range.top();
+      range.pop();
+      auto rangeLen = maxOffset - minElem.first + 1;
       if (rangeLen < minRangeLen) {
          minRangeLen = rangeLen;
-         minRange.first = minOffset;
+         minRange.first = minElem.first;
          minRange.second = maxOffset;
          if (rangeLen == pos.size()) break;
       }
-      pos[minElem].first.pop_front();
-      if (pos[minElem].first.empty()) break;
+      if (pos[minElem.second].first.empty()) break;
+      auto o = pos[minElem.second].first.front();
+      pos[minElem.second].first.pop_front();
+      if (o > maxOffset) maxOffset = o;
+      range.push(make_pair(o, minElem.second));
    } while (true);
    return make_pair<Iter, Iter>(next(beg, minRange.first),
                                 next(beg, minRange.second+1));
