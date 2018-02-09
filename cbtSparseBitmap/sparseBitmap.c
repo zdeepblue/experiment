@@ -197,12 +197,11 @@ TrieAccept(TrieNode *pNode, uint8 height, uint64 *fromAddr, uint64 toAddr,
    }
    if (height == 0) {
       // leaf
-      uint64 nodeAddr = (*fromAddr) & ~LEAF_VALUE_MASK :
-      uint64 maxAddr = (*fromAddr) | LEAF_VALUE_MASK;
-      uint16 fromOffset =
-         (*fromAddr > nodeAddr) ? (*fromAddr) & LEAF_VALUE_MASK : 0;
+      uint64 nodeAddr = (*fromAddr) & ~LEAF_VALUE_MASK;
+      uint16 fromOffset = (*fromAddr) & LEAF_VALUE_MASK;
       uint16 toOffset =
-         (toAddr > maxAddr) ? LEAF_VALUE_MASK : toAddr & LEAF_VALUE_MASK;
+         (toAddr > ((*fromAddr) | LEAF_VALUE_MASK)) ?
+                LEAF_VALUE_MASK : toAddr & LEAF_VALUE_MASK;
       if (visitor->_visitLeafNode != NULL) {
          if ((ret = visitor->_visitLeafNode(visitor, nodeAddr, height,
                                             fromOffset, toOffset, *pNode))
@@ -211,10 +210,7 @@ TrieAccept(TrieNode *pNode, uint8 height, uint64 *fromAddr, uint64 toAddr,
          }
       }
       // update fromAddr for next node in traverse
-      if (toAddr < maxAddr) {
-         maxAddr = toAddr;
-      }
-      *fromAddr = maxAddr+1;
+      *fromAddr = nodeAddr + toOffset + 1;
    } else {
       // inner node
       uint64 nodeAddr = (*fromAddr) & NODE_ADDR_MASK(height);
