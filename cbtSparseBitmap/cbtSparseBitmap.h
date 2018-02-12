@@ -1,66 +1,87 @@
 #ifndef _CBT_SPARSE_BITMAP_H_
 #define _CBT_SPARSE_BITMAP_H_
 
-typedef Bool (*BlockTrackingSparseBitmapAccessBitCB)(void *cbData, uint64 addr);
+#include <stdint.h>
+#define Bool int
+#define TRUE 1
+#define FALSE 0
+
+typedef Bool (*BlockTrackingSparseBitmapAccessBitCB)(void *cbData, uint64_t addr);
 
 struct BlockTrackingSparseBitmap_t;
 typedef struct BlockTrackingSparseBitmap_t *BlockTrackingSparseBitmap;
   
-enum BlockTrackingSparseBitmapErrorCode{
+typedef enum {
    BLOCKTRACKING_BMAP_ERR_OK = 0,
    BLOCKTRACKING_BMAP_ERR_INVALID_ARG,
+   BLOCKTRACKING_BMAP_ERR_INVALID_ADDR,
    BLOCKTRACKING_BMAP_ERR_OUT_OF_RANGE,
    BLOCKTRACKING_BMAP_ERR_OUT_OF_MEM,
    BLOCKTRACKING_BMAP_ERR_FAIL
-};
+} BlockTrackingSparseBitmapError;
 
 // constructor and destructor
-BlockTrackingSparseBitmapErrorCode
+BlockTrackingSparseBitmapError
 BlockTrackingSparseBitmap_Create(BlockTrackingSparseBitmap *bitmap);
 
 void
 BlockTrackingSparseBitmap_Destroy(BlockTrackingSparseBitmap bitmap);
 
 // set and query
-BlockTrackingSparseBitmapErrorCode
-BlockTrackingSparseBitmap_SetAt(BlockTrackingSparseBitmap bitmap, uint64 addr,
-                                Bool *oldValue)
+BlockTrackingSparseBitmapError
+BlockTrackingSparseBitmap_SetAt(BlockTrackingSparseBitmap bitmap, uint64_t addr,
+                                Bool *oldValue);
 
-BlockTrackingSparseBitmapErrorCode
+BlockTrackingSparseBitmapError
 BlockTrackingSparseBitmap_SetInRange(BlockTrackingSparseBitmap bitmap,
-                                     uint64 fromAddr, uint64 toAddr);
+                                     uint64_t fromAddr, uint64_t toAddr);
 
-BlockTrackingSparseBitmapErrorCode
-BlockTrackingSparseBitmap_IsSet(BlockTrackingSparseBitmap bitmap, uint64 addr,
+BlockTrackingSparseBitmapError
+BlockTrackingSparseBitmap_IsSet(BlockTrackingSparseBitmap bitmap, uint64_t addr,
                                 Bool *oldValue);
 
 // traverse bits
-BlockTrackingSparseBitmapErrorCode
+BlockTrackingSparseBitmapError
 BlockTrackingSparseBitmap_Traverse(BlockTrackingSparseBitmap bitmap,
-                                   uint64 fromAddr, uint64 toAddr,
+                                   uint64_t fromAddr, uint64_t toAddr,
                                    BlockTrackingSparseBitmapAccessBitCB cb,
                                    void *cbData);
 
 // swap two bitmaps
-void
+BlockTrackingSparseBitmapError
 BlockTrackingSparseBitmap_Swap(BlockTrackingSparseBitmap bitmap1,
                                BlockTrackingSparseBitmap bitmap2);
 
 // merge source to destination bitmap
-BlockTrackingSparseBitmapErrorCode
+BlockTrackingSparseBitmapError
 BlockTrackingSparseBitmap_Merge(BlockTrackingSparseBitmap dest,
                                 BlockTrackingSparseBitmap src);
 
 // serialize and deserialize
-BlockTrackingSparseBitmapErrorCode
+BlockTrackingSparseBitmapError
 BlockTrackingSparseBitmap_Serialize(BlockTrackingSparseBitmap bitmap,
-                                    char *flatBitmap, uint32 flatBitmapLen);
+                                    char *flatBitmap, uint32_t flatBitmapLen);
 
-BlockTrackingSparseBitmapErrorCode
+BlockTrackingSparseBitmapError
 BlockTrackingSparseBitmap_Deserialize(BlockTrackingSparseBitmap bitmap,
                                       const char *flatBitmap,
-                                      uint32 flatBitmapLen);
+                                      uint32_t flatBitmapLen);
 
+BlockTrackingSparseBitmapError
+BlockTrackingSparseBitmap_GetStreamMaxSize(uint64_t maxAddr, uint32_t *streamLen);
 
+BlockTrackingSparseBitmapError
+BlockTrackingSparseBitmap_GetStreamSize(BlockTrackingSparseBitmap bitmap,
+                                        uint32_t *streamLen);
+
+#ifdef CBT_SPARSE_BITMAP_DEBUG
+BlockTrackingSparseBitmapError
+BlockTrackingSparseBitmap_GetBitCount(BlockTrackingSparseBitmap bitmap,
+                                      uint32_t *bitCount);
+
+BlockTrackingSparseBitmapError
+BlockTrackingSparseBitmap_GetMemoryInUse(BlockTrackingSparseBitmap bitmap,
+                                         uint32_t *memoyInUse);
+#endif
 
 #endif
