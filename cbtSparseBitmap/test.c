@@ -3,6 +3,7 @@
 #include <stddef.h>
 #include <assert.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 #define MAX_ADDR 0xFFFFFFull
 
@@ -23,12 +24,14 @@ void printBitmapStat(BlockTrackingSparseBitmap bitmap,
    assert(expMem == memoryInUse);
    assert(expBits == bitCount);
 }
-int main()
+
+void testBasic()
 {
    Bool isSet = FALSE;
    BlockTrackingSparseBitmap bitmap;
    BlockTrackingSparseBitmapError error;
 
+   printf("=== %s === \n", __FUNCTION__);
    // create
    error = BlockTrackingSparseBitmap_Create(&bitmap);
    assert(error == BLOCKTRACKING_BMAP_ERR_OK);
@@ -40,6 +43,15 @@ int main()
    error = BlockTrackingSparseBitmap_IsSet(bitmap, 100, &isSet);
    assert(error == BLOCKTRACKING_BMAP_ERR_OK);
    assert(isSet);
+
+   isSet = FALSE;
+   error = BlockTrackingSparseBitmap_SetAt(bitmap, 100, &isSet);
+   assert(error == BLOCKTRACKING_BMAP_ERR_OK);
+   assert(isSet);
+
+   error = BlockTrackingSparseBitmap_IsSet(bitmap, 101, &isSet);
+   assert(error == BLOCKTRACKING_BMAP_ERR_OK);
+   assert(!isSet);
 
    printBitmapStat(bitmap, 128, 1);
    // set on max
@@ -67,5 +79,132 @@ int main()
    // destroy
    BlockTrackingSparseBitmap_Destroy(bitmap);
 
-   printf("All test passed.\n");
+}
+
+void testMerge()
+{
+   Bool isSet = FALSE;
+   BlockTrackingSparseBitmap bitmap1, bitmap2, bitmap3;
+   BlockTrackingSparseBitmapError error;
+
+   printf("=== %s === \n", __FUNCTION__);
+   // create
+   error = BlockTrackingSparseBitmap_Create(&bitmap1);
+   assert(error == BLOCKTRACKING_BMAP_ERR_OK);
+   error = BlockTrackingSparseBitmap_Create(&bitmap2);
+   assert(error == BLOCKTRACKING_BMAP_ERR_OK);
+
+   // at same leaf
+   error = BlockTrackingSparseBitmap_SetAt(bitmap1, 0xFF, NULL);
+   assert(error == BLOCKTRACKING_BMAP_ERR_OK);
+   error = BlockTrackingSparseBitmap_SetAt(bitmap2, 0x1FF, NULL);
+   assert(error == BLOCKTRACKING_BMAP_ERR_OK);
+
+   error = BlockTrackingSparseBitmap_Merge(bitmap1, bitmap2);
+   assert(error == BLOCKTRACKING_BMAP_ERR_OK);
+
+   error = BlockTrackingSparseBitmap_IsSet(bitmap1, 0xFF, &isSet);
+   assert(error == BLOCKTRACKING_BMAP_ERR_OK);
+   assert(isSet);
+   isSet = FALSE;
+   error = BlockTrackingSparseBitmap_IsSet(bitmap1, 0x1FF, &isSet);
+   assert(error == BLOCKTRACKING_BMAP_ERR_OK);
+   assert(isSet);
+   printBitmapStat(bitmap1, 128, 2);
+
+   // diff leaf
+   error = BlockTrackingSparseBitmap_Create(&bitmap3);
+   assert(error == BLOCKTRACKING_BMAP_ERR_OK);
+   isSet = FALSE;
+   error = BlockTrackingSparseBitmap_SetAt(bitmap3, 0x2FF, &isSet);
+   assert(error == BLOCKTRACKING_BMAP_ERR_OK);
+   assert(!isSet);
+
+   error = BlockTrackingSparseBitmap_Merge(bitmap1, bitmap3);
+   assert(error == BLOCKTRACKING_BMAP_ERR_OK);
+
+   error = BlockTrackingSparseBitmap_IsSet(bitmap1, 0x2FF, &isSet);
+   assert(error == BLOCKTRACKING_BMAP_ERR_OK);
+   assert(isSet);
+
+   printBitmapStat(bitmap1, 256, 3);
+
+   // destroy
+   BlockTrackingSparseBitmap_Destroy(bitmap1);
+}
+
+void testSerialize()
+{
+   Bool isSet = FALSE;
+   char *stream;
+   uint32_t streamLen;
+   BlockTrackingSparseBitmap bitmap1, bitmap2;
+   BlockTrackingSparseBitmapError error;
+
+   printf("=== %s === \n", __FUNCTION__);
+   // create
+   error = BlockTrackingSparseBitmap_Create(&bitmap1);
+   assert(error == BLOCKTRACKING_BMAP_ERR_OK);
+   error = BlockTrackingSparseBitmap_Create(&bitmap2);
+   assert(error == BLOCKTRACKING_BMAP_ERR_OK);
+
+   isSet = TRUE;
+   error = BlockTrackingSparseBitmap_SetAt(bitmap1, 0xFF, &isSet);
+   assert(error == BLOCKTRACKING_BMAP_ERR_OK);
+   assert(!isSet);
+   isSet = TRUE;
+   error = BlockTrackingSparseBitmap_SetAt(bitmap1, 0xFFF, &isSet);
+   assert(error == BLOCKTRACKING_BMAP_ERR_OK);
+   assert(!isSet);
+   isSet = TRUE;
+   error = BlockTrackingSparseBitmap_SetAt(bitmap1, 0x1FFFF, &isSet);
+   assert(error == BLOCKTRACKING_BMAP_ERR_OK);
+   assert(!isSet);
+   printBitmapStat(bitmap1, 512, 3);
+
+   error = BlockTrackingSparseBitmap_GetStreamSize(bitmap1, &streamLen);
+   assert(error == BLOCKTRACKING_BMAP_ERR_OK);
+
+   stream = (char *)calloc(streamLen, 1);
+   error = BlockTrackingSparseBitmap_Serialize(bitmap1, stream, streamLen);
+   assert(error == BLOCKTRACKING_BMAP_ERR_OK);
+
+   isSet = TRUE;
+   error = BlockTrackingSparseBitmap_SetAt(bitmap2, 0x46C, &isSet);
+   assert(error == BLOCKTRACKING_BMAP_ERR_OK);
+   assert(!isSet);
+
+   error = BlockTrackingSparseBitmap_Deserialize(bitmap2, stream, streamLen);
+   assert(error == BLOCKTRACKING_BMAP_ERR_OK);
+
+   isSet = FALSE;
+   error = BlockTrackingSparseBitmap_IsSet(bitmap2, 0xFF, &isSet);
+   assert(error == BLOCKTRACKING_BMAP_ERR_OK);
+   assert(isSet);
+   isSet = FALSE;
+   error = BlockTrackingSparseBitmap_IsSet(bitmap2, 0xFFF, &isSet);
+   assert(error == BLOCKTRACKING_BMAP_ERR_OK);
+   assert(isSet);
+   isSet = FALSE;
+   error = BlockTrackingSparseBitmap_IsSet(bitmap2, 0x1FFFF, &isSet);
+   assert(error == BLOCKTRACKING_BMAP_ERR_OK);
+   assert(isSet);
+   isSet = FALSE;
+   error = BlockTrackingSparseBitmap_IsSet(bitmap2, 0x46C, &isSet);
+   assert(error == BLOCKTRACKING_BMAP_ERR_OK);
+   assert(isSet);
+   printBitmapStat(bitmap2, 576, 4);
+
+   // destroy
+   BlockTrackingSparseBitmap_Destroy(bitmap2);
+   BlockTrackingSparseBitmap_Destroy(bitmap1);
+}
+
+int main()
+{
+   testBasic();
+   testMerge();
+   testSerialize();
+
+   printf("All test cases passed.\n");
 }
