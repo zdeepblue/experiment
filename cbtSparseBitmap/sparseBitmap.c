@@ -417,11 +417,12 @@ TraverseVisitLeafNode(BlockTrackingSparseBitmapVisitor *visitor,
    GET_BITMAP_BYTE_BIT(fromOffset, byte, bit);
    GET_BITMAP_BYTE_BIT(toOffset, toByte, toBit);
 
-   char *bitmap = node->_bitmap;
+   uint8_t *bitmap = node->_bitmap;
    for (i = byte, nodeAddr += i * 8 ; i <= toByte ; ++i, nodeAddr += 8) {
-      char c = bitmap[i];
+      uint8_t c = bitmap[i];
       uint b = (i == byte) ? bit : 0;
       uint e = (i == toByte) ? toBit : 7;
+      c >>= b;
       while (c > 0 && b <= e) {
          if (c & 0x1 > 0) {
             if (!cb(data->_cbData, nodeAddr+b)) {
@@ -429,6 +430,7 @@ TraverseVisitLeafNode(BlockTrackingSparseBitmapVisitor *visitor,
             }
          }
          c >>= 1;
+         ++b;
       }
    }
 
@@ -726,7 +728,7 @@ BlockTrackingSparseBitmapTraverse(const BlockTrackingSparseBitmap bitmap,
 {
    BlockTrackingBitmapCallbackData data = {cb, cbData};
    BlockTrackingSparseBitmapVisitor traverse =
-      {TraverseVisitLeafNode, NULL, NULL, NULL, NULL, NULL};
+      {TraverseVisitLeafNode, NULL, NULL, NULL, &data, NULL};
    return BlockTrackingSparseBitmapAccept(bitmap, fromAddr, toAddr, &traverse);
 }
 
@@ -888,7 +890,6 @@ BlockTrackingSparseBitmap_Merge(BlockTrackingSparseBitmap dest,
                                 BlockTrackingSparseBitmap src)
 {
    uint8_t i;
-   TrieVisitorReturnCode trieErrorCode;
    if (dest == NULL || src == NULL) {
       return BLOCKTRACKING_BMAP_ERR_INVALID_ARG;
    }
@@ -898,13 +899,9 @@ BlockTrackingSparseBitmap_Merge(BlockTrackingSparseBitmap dest,
 
 #ifdef CBT_SPARSE_BITMAP_DEBUG
    BlockTrackingSparseBitmapUpdateStatistics(src);
+   BlockTrackingSparseBitmapUpdateStatistics(dest);
 #endif
-   BlockTrackingSparseBitmap_Destroy(src);
-#ifdef CBT_SPARSE_BITMAP_DEBUG
-   return BlockTrackingSparseBitmapUpdateStatistics(dest);
-#else
    return BLOCKTRACKING_BMAP_ERR_OK;
-#endif
 }
 
 
@@ -918,7 +915,7 @@ BlockTrackingSparseBitmap_Deserialize(BlockTrackingSparseBitmap bitmap,
 
    return BlockTrackingSparseBitmapDeserialize(bitmap, stream, streamLen);
 }
-                                 
+
 BlockTrackingSparseBitmapError
 BlockTrackingSparseBitmap_Serialize(const BlockTrackingSparseBitmap bitmap,
                                     char *stream, uint32_t streamLen)
