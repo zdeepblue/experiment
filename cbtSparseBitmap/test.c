@@ -4,9 +4,13 @@
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <sys/time.h>
+#include <string.h>
 
-#define MAX_ADDR 0xFFFFFFull
+#define MAX_ADDR  0x7FFFFFull
+#define MAX_MEM   0x124980
 
+#define ADDR_MASK (MAX_ADDR >> 1)
 
 void checkBitmapStat(BlockTrackingSparseBitmap bitmap,
                      uint32_t expMem, uint32_t expBits)
@@ -16,12 +20,12 @@ void checkBitmapStat(BlockTrackingSparseBitmap bitmap,
 
    error = BlockTrackingSparseBitmap_GetMemoryInUse(bitmap, &memoryInUse);
    assert(error == BLOCKTRACKING_BMAP_ERR_OK);
-   //printf("memory in use = 0x%x\n", memoryInUse);
+   printf("memory in use = 0x%x\n", memoryInUse);
    error = BlockTrackingSparseBitmap_GetBitCount(bitmap, &bitCount);
    assert(error == BLOCKTRACKING_BMAP_ERR_OK);
-   //printf("bit count = 0x%x\n", bitCount);
+   printf("bit count = 0x%x\n", bitCount);
 
-   assert(expMem == memoryInUse);
+   assert(expMem  == memoryInUse);
    assert(expBits == bitCount);
 }
 
@@ -86,7 +90,7 @@ void testBasic()
 
    checkBitmapStat(bitmap, 128, 1);
    // set on max
-   error = BlockTrackingSparseBitmap_SetAt(bitmap, MAX_ADDR, NULL);
+   error = BlockTrackingSparseBitmap_SetInRange(bitmap, MAX_ADDR, MAX_ADDR);
    assert(error == BLOCKTRACKING_BMAP_ERR_OK);
 
    isSet = FALSE;
@@ -96,10 +100,10 @@ void testBasic()
 
    checkBitmapStat(bitmap, 512, 2);
    // set on max+1
-   error = BlockTrackingSparseBitmap_SetAt(bitmap, MAX_ADDR+1, NULL);
-   assert(error == BLOCKTRACKING_BMAP_ERR_INVALID_ADDR);
-
-   checkBitmapStat(bitmap, 512, 2);
+//   error = BlockTrackingSparseBitmap_SetAt(bitmap, MAX_ADDR+1, NULL);
+//   assert(error == BLOCKTRACKING_BMAP_ERR_INVALID_ADDR);
+//
+//   checkBitmapStat(bitmap, 512, 2);
 
    expAddrs[1] = MAX_ADDR;
    checkBits(bitmap, expAddrs, 2);
@@ -127,10 +131,10 @@ void testBasic()
    checkBits(bitmap, expAddrs, i);
 
    // set all bits
-   error = BlockTrackingSparseBitmap_SetInRange(bitmap, 0, -1);
+   error = BlockTrackingSparseBitmap_SetInRange(bitmap, 0, MAX_ADDR);
    assert(error == BLOCKTRACKING_BMAP_ERR_OK);
 
-   checkBitmapStat(bitmap, 0x249280, MAX_ADDR+1);
+   checkBitmapStat(bitmap, MAX_MEM, MAX_ADDR+1);
 
    for (addr = 0; addr <= MAX_ADDR ; ++addr) {
       expAddrs[addr] = addr;
@@ -144,7 +148,7 @@ void testBasic()
       assert(error == BLOCKTRACKING_BMAP_ERR_OK);
       error = BlockTrackingSparseBitmap_Swap(bitmap, tmpBitmap);
       assert(error == BLOCKTRACKING_BMAP_ERR_OK);
-      checkBitmapStat(tmpBitmap, 0x249280, MAX_ADDR+1);
+      checkBitmapStat(tmpBitmap, MAX_MEM, MAX_ADDR+1);
       checkBitmapStat(bitmap, 64, 0);
       BlockTrackingSparseBitmap_Destroy(tmpBitmap);
    }
@@ -350,12 +354,177 @@ void testExtent()
    BlockTrackingSparseBitmap_Destroy(bitmap);
 }
 
-int main()
-{
-   testBasic();
-   testMerge();
-   testSerialize();
-   testExtent();
+typedef struct {
+   char *_pool;
+   uint32_t _poolSize;
+   uint32_t _offset;
+} MemoryPool;
 
-   printf("All test cases passed.\n");
+void *
+allocFromPool(void *data, uint64_t size)
+{
+   MemoryPool *pool = (MemoryPool *)data;
+//   if (pool->_offset + size >= pool->_poolSize) {
+//      return NULL;
+//   }
+   char *addr = &pool->_pool[pool->_offset];
+   pool->_offset += size;
+   return addr;
+}
+
+void
+freeToPool(void *data, void *ptr)
+{}
+
+// user data from a customer in format {start, length} in byte
+// with block size 512KB and disk size 560GB
+Extent gUserData[] = {
+   {0, 524288}, {1048576, 3149922304}, {3151495168, 524288},
+   {3172466688, 51380224}, {3432513536, 495183200256}, {498616762368, 1572864},
+   {498618859520, 17662738432}, {518700138496, 524288}, {518967001088, 1048576},
+   {519226523648, 524288}, {519361265664, 1048576}, {519498629120, 1048576},
+   {519756578816, 1048576}, {520029732864, 1048576}, {520164999168, 524288},
+   {547605708800, 524288}, {601292800000, 524288}
+};
+
+void
+initUserData()
+{
+   // predefined user data input
+   // transform input data
+   uint8_t dataLen = sizeof(gUserData) / sizeof(Extent);
+   uint8_t i;
+   for (i = 0 ; i < dataLen ; ++i) {
+      Extent *ext = &gUserData[i];
+      ext->_end = ext->_start + ext->_end - 1;
+      // 512 KB block size
+      ext->_end >>= 17;
+      ext->_start >>= 17;
+   }
+}
+
+typedef uint64_t (*GetAddress)();
+
+uint64_t
+getRandomAddr()
+{
+   uint64_t addr = (uint64_t)lrand48();
+   addr &= ADDR_MASK;
+   return addr;
+}
+
+uint64_t
+getAddrInRange()
+{
+   uint64_t r = (uint64_t)lrand48();
+   uint8_t index = r % (sizeof(gUserData)/sizeof(Extent));
+   uint64_t offset;
+   Extent *ext = &gUserData[index];
+   r = (uint64_t)lrand48();
+   offset = r % (ext->_end - ext->_start + 1);
+   return ext->_start + offset;
+}
+
+uint64_t
+perfBenchMark(uint32_t iterations, GetAddress getAddr)
+{
+   BlockTrackingSparseBitmapError error;
+   BlockTrackingSparseBitmap bitmap;
+   uint32_t i, mem;
+   uint64_t elapsed;
+   struct timeval start, end;
+   char *flatBitmap;
+   printf("=== random set %d times === \n", iterations);
+   // the bitmap in kernel
+   error = BlockTrackingSparseBitmap_Create(&bitmap,
+         BLOCKTRACKING_BMAP_MODE_FAST_SET|BLOCKTRACKING_BMAP_MODE_FAST_SERIALIZE);
+   assert(error == BLOCKTRACKING_BMAP_ERR_OK);
+
+   // sparse bitmap
+   gettimeofday(&start, NULL);
+   for (i = 0 ; i < iterations ; ++i) {
+      uint64_t addr = getAddr();
+      BlockTrackingSparseBitmap_SetAt(bitmap, addr, NULL);
+   }
+   gettimeofday(&end, NULL);
+
+   elapsed = ((uint64_t)end.tv_sec * 1000000 + end.tv_usec -
+              ((uint64_t)start.tv_sec * 1000000 + start.tv_usec)) / 1000;
+   printf("sparse bitmap time elapsed: %lu msec.\n", elapsed);
+
+   error = BlockTrackingSparseBitmap_GetMemoryInUse(bitmap, &mem);
+   assert(error == BLOCKTRACKING_BMAP_ERR_OK);
+   printf("sparse bitmap memory consumption: %lu bytes.\n", mem);
+
+   flatBitmap = (char *)calloc((MAX_ADDR+1) / 8, 1);
+
+   // flat bitmap
+   gettimeofday(&start, NULL);
+   for (i = 0 ; i < iterations ; ++i) {
+      uint32_t byte; uint8_t bit;
+      uint64_t addr = getAddr();
+      byte = addr >> 3;
+      bit = addr & 7;
+      if ((flatBitmap[byte] & (1u<<bit)) == 0) {
+         flatBitmap[byte] |= 1 << bit;
+      }
+   }
+   gettimeofday(&end, NULL);
+
+   free(flatBitmap);
+   elapsed = ((uint64_t)end.tv_sec * 1000000 + end.tv_usec -
+              ((uint64_t)start.tv_sec * 1000000 + start.tv_usec)) / 1000;
+   printf("flat bitmap time elapsed: %lu msec.\n", elapsed);
+   printf("flat bitmap memory consumption: %lu bytes.\n", (MAX_ADDR+1)/8);
+   BlockTrackingSparseBitmap_Destroy(bitmap);
+   return elapsed;
+}
+
+void main(int argc, char *argv[])
+{
+   Bool isTest = TRUE;
+   Bool isPerfRand = FALSE;
+   Bool isPerfUser = FALSE;
+   if (argc > 1) {
+      isTest = strncmp(argv[1], "test", 5) == 0;
+      isPerfRand = strncmp(argv[1], "perf-rand", 10) == 0;
+      isPerfUser = strncmp(argv[1], "perf-user", 10) == 0;
+   }
+   if (isTest) {
+      BlockTrackingSparseBitmapError error;
+      error = BlockTrackingSparseBitmap_Init(NULL);
+      assert(error == BLOCKTRACKING_BMAP_ERR_OK);
+      testBasic();
+      testMerge();
+      testSerialize();
+      testExtent();
+
+      printf("All test cases passed.\n");
+   }
+   if (isPerfUser || isPerfRand) {
+      int loopCount = 0;
+      BlockTrackingSparseBitmapError error;
+      MemoryPool thePool = {(char *)calloc(MAX_MEM, 1), MAX_MEM, 0};
+      BlockTrackingSparseBitmapAllocator bitmapAllocator =
+            {allocFromPool, freeToPool, &thePool};
+      error = BlockTrackingSparseBitmap_Init(&bitmapAllocator);
+      assert(error == BLOCKTRACKING_BMAP_ERR_OK);
+      if (argc > 2) {
+         loopCount = atoi(argv[2]);
+      }
+      if (loopCount == 0) {
+         loopCount = 1 << 18;
+      }
+      if (isPerfUser) {
+         initUserData();
+      }
+      for (; loopCount > 0; loopCount >>= 1) {
+         perfBenchMark(loopCount, (isPerfRand) ? getRandomAddr : getAddrInRange);
+         memset(thePool._pool, 0, thePool._poolSize);
+         thePool._offset = 0;
+      }
+      free(thePool._pool);
+      printf("end of performance benchmark.\n");
+   }
+   BlockTrackingSparseBitmap_Exit();
 }

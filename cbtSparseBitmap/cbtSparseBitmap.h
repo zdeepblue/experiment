@@ -15,12 +15,20 @@ typedef Bool (*BlockTrackingSparseBitmapAccessExtentCB)(void *cbData,
 struct BlockTrackingSparseBitmap_t;
 typedef struct BlockTrackingSparseBitmap_t *BlockTrackingSparseBitmap;
 
+typedef struct BlockTrackingSparseBitmapAllocator_t {
+   void *(*allocate)(void *data, uint64_t size);
+   void (*deallocate)(void *data, void *ptr);
+   void *_data;
+} BlockTrackingSparseBitmapAllocator;
+
+
 typedef enum {
    BLOCKTRACKING_BMAP_ERR_OK = 0,
    BLOCKTRACKING_BMAP_ERR_INVALID_ARG,
    BLOCKTRACKING_BMAP_ERR_INVALID_ADDR,
    BLOCKTRACKING_BMAP_ERR_OUT_OF_RANGE,
    BLOCKTRACKING_BMAP_ERR_OUT_OF_MEM,
+   BLOCKTRACKING_BMAP_ERR_REINIT,
    BLOCKTRACKING_BMAP_ERR_FAIL
 } BlockTrackingSparseBitmapError;
 
@@ -29,6 +37,12 @@ typedef enum {
 #define BLOCKTRACKING_BMAP_MODE_FAST_MERGE 2
 #define BLOCKTRACKING_BMAP_MODE_FAST_SERIALIZE 4
 #define BLOCKTRACKING_BMAP_MODE_FAST_STATISTIC 8
+
+BlockTrackingSparseBitmapError
+BlockTrackingSparseBitmap_Init(BlockTrackingSparseBitmapAllocator *alloc);
+
+void
+BlockTrackingSparseBitmap_Exit();
 
 // constructor and destructor
 BlockTrackingSparseBitmapError
