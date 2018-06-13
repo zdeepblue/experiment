@@ -51,7 +51,7 @@ typedef struct CBTBitmapAllocator {
     *    size - input. The requested chunk size.
     *
     * Results:
-    *    None.
+    *    return the allocated memory chunk.
     *
     *--------------------------------------------------------------------------
     */
@@ -507,5 +507,22 @@ CBTBitmap_GetBitCount(CBTBitmap bitmap, uint32 *bitCount);
 
 CBTBitmapError
 CBTBitmap_GetMemoryInUse(CBTBitmap bitmap, uint32 *memoyInUse);
+
+
+/*
+ *-----------------------------------------------------------------------------
+ *
+ * CBTBitmap_GetCapacity --
+ *
+ *    Get capacity of CBT bitmap
+ *
+ * Results:
+ *    The capacity
+ *
+ *-----------------------------------------------------------------------------
+  */
+
+uint64
+CBTBitmap_GetCapacity();
 
 #endif

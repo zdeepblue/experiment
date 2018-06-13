@@ -6,15 +6,31 @@
 /*
  * CBT Bitmap Sparse Bitmap implementation file
  *
- * It applies a Trie forest to implement sparse bitmap and its operations.
+ * It applies a Trie forest as a sparse bitmap to implement all public APIs.
  */
 
 #include "cbtBitmap.h"
 
+#ifndef VMKERNEL
 #include <stdlib.h>
 #include <string.h>
 #include <assert.h>
+   #ifndef ASSERT
+      #define ASSERT(x) assert(x)
+   #endif
+   #ifdef _MSC_VER
+      #define inline
+   #endif
+#else
+#include "vm_types.h"
+#include "vm_libc.h"
+#include "vm_assert.h"
+#include "vmkernel.h"
+#include "libc.h"
+#endif
 
+
+// definition of maros
 #define MAX_NUM_TRIES 6
 #define ADDR_BITS_IN_LEAF 9
 #define ADDR_BITS_IN_INNER_NODE 3
@@ -64,6 +80,8 @@ typedef union TrieNode {
 #define IS_TRIE_STAT_FLAG_MEMORY_ALLOC_ON(f) ((f) & TRIE_STAT_FLAG_MEMORY_ALLOC)
 #define IS_TRIE_STAT_FLAG_COUNT_LEAF_ON(f) ((f) & TRIE_STAT_FLAG_COUNT_LEAF)
 
+
+// definition of data structures
 typedef struct TrieStatistics {
    uint32 _totalSet;
    uint32 _memoryInUse;
@@ -72,10 +90,8 @@ typedef struct TrieStatistics {
 } TrieStatistics;
 
 struct CBTBitmap {
-   TrieNode ries[MAX_NUM_TRIES];
+   TrieNode _tries[MAX_NUM_TRIES];
    TrieStatistics _stat;
-   uint8 _padding[sizeof(union TrieNode) -
-                     sizeof(TrieNode)*MAX_NUM_TRIES - sizeof(TrieStatistics)];
 };
 
 typedef struct BlockTrackingBitmapCallbackData {
@@ -84,11 +100,22 @@ typedef struct BlockTrackingBitmapCallbackData {
 } BlockTrackingBitmapCallbackData;
 
 
-// pack it to avoid waste bytes for allignment
-typedef struct BlockTrackingSparseBitmapStream {
+// pack it to avoid waste bytes with allignment for serialization stream
+typedef
+#ifndef CBT_BITMAP_UNITTEST
+#include "vmware_pack_begin.h"
+#endif
+struct BlockTrackingSparseBitmapStream {
    uint16 _nodeOffset;
    union TrieNode _node;
-} __attribute__((packed)) BlockTrackingSparseBitmapStream;
+}
+#ifndef CBT_BITMAP_UNITTEST
+#include "vmware_pack_end.h"
+#else
+__attribute__((__packed__)) 
+#endif
+BlockTrackingSparseBitmapStream;
+
 
 // visitor pattern
 typedef enum {
@@ -122,31 +149,91 @@ typedef struct BlockTrackingSparseBitmapVisitor {
    TrieStatistics *_stat;
 } BlockTrackingSparseBitmapVisitor;
 
+
+// globals
 static Bool g_IsInited;
+static CBTBitmapAllocator g_Allocator;
+
 
 ////////////////////////////////////////////////////////////////////////////////
 //   Allocate/Free Functions
 ////////////////////////////////////////////////////////////////////////////////
 
-static CBTBitmapAllocator g_Allocator;
+
+static void *
+CBTBitmapDefaultAlloc(void *data, uint64 size)
+{
+#ifndef VMKERNEL
+   return malloc(size);
+#else
+   ASSERT(0);
+   return NULL;
+#endif
+}
+
+static void
+CBTBitmapDefaultFree(void *data, void *ptr)
+{
+#ifndef VMKERNEL
+   free(ptr);
+#else
+   ASSERT(0);
+#endif
+}
+
+/*
+ *-----------------------------------------------------------------------------
+ *
+ * AllocateTrieNode --
+ *
+ *    Allocate a trie node.
+ *
+ * Parameter:
+ *    stat - input. A pointer to statistics object.
+ *    isLeaf - input. Indicate to allocate a leaf node.
+ *
+ * Results:
+ *    The trie node or NULL if error.
+ *
+ *-----------------------------------------------------------------------------
+ */
 
 static inline TrieNode
 AllocateTrieNode(TrieStatistics *stat, Bool isLeaf)
 {
    TrieNode node =
-      (g_Allocator.allocate != NULL) ?
-          (TrieNode)g_Allocator.allocate(g_Allocator._data, sizeof(*node)) :
-          (TrieNode)calloc(1, sizeof(*node));
-   if (node != NULL && stat != NULL) {
-      if (IS_TRIE_STAT_FLAG_MEMORY_ALLOC_ON(stat->_flag)) {
-         stat->_memoryInUse += sizeof(*node);
-      }
-      if (isLeaf && IS_TRIE_STAT_FLAG_COUNT_LEAF_ON(stat->_flag)) {
-         stat->_leafCount++;
+          (TrieNode)g_Allocator.allocate(g_Allocator._data, sizeof(*node));
+   if (node != NULL) {
+      memset(node, 0, sizeof *node);
+      if (stat != NULL) {
+         if (IS_TRIE_STAT_FLAG_MEMORY_ALLOC_ON(stat->_flag)) {
+            stat->_memoryInUse += sizeof(*node);
+         }
+         if (isLeaf && IS_TRIE_STAT_FLAG_COUNT_LEAF_ON(stat->_flag)) {
+            stat->_leafCount++;
+         }
       }
    }
    return node;
 }
+
+
+/*
+ *-----------------------------------------------------------------------------
+ *
+ * FreeTrieNode --
+ *
+ *    Free a trie node.
+ *
+ * Parameter:
+ *    TrieNode - input. The node instance.
+ *    stat - input. A pointer to statistics object.
+ *
+ * Results:
+ *    The trie node or NULL if error.
+ *
+ *-----------------------------------------------------------------------------
+ */
 
 static inline void
 FreeTrieNode(TrieNode node, TrieStatistics *stat)
@@ -154,36 +241,84 @@ FreeTrieNode(TrieNode node, TrieStatistics *stat)
    if (stat != NULL && IS_TRIE_STAT_FLAG_MEMORY_ALLOC_ON(stat->_flag)) {
       stat->_memoryInUse -= sizeof(*node);
    }
-   if (g_Allocator.deallocate != NULL) {
-      g_Allocator.deallocate(g_Allocator._data, node);
-   } else {
-      free(node);
-   }
+   g_Allocator.deallocate(g_Allocator._data, node);
 }
+
+
+/*
+ *-----------------------------------------------------------------------------
+ *
+ * AllocateBitmap --
+ *
+ *    Allocate the memory of a CBT bitmap
+ *
+ * Results:
+ *    An allocated CBT bitmap without initialization.
+ *
+ *-----------------------------------------------------------------------------
+ */
 
 static inline CBTBitmap
 AllocateBitmap()
 {
+#ifdef VMKERNEL
+   ASSERT_ON_COMPILE(sizeof(struct CBTBitmap) <= sizeof(union TrieNode));
+   ASSERT_ON_COMPILE(sizeof(union TrieNode) == CACHELINE_SIZE);
+#endif
    CBTBitmap bitmap =
-      (g_Allocator.allocate != NULL) ?
-          (CBTBitmap)g_Allocator.allocate(g_Allocator._data, sizeof(*bitmap)) :
-          (CBTBitmap)calloc(1, sizeof(*bitmap));
+          (CBTBitmap)g_Allocator.allocate(g_Allocator._data, sizeof(*bitmap));
+   if (bitmap != NULL) {
+      memset(bitmap, 0, sizeof *bitmap);
+   }
    return bitmap;
 }
+
+
+/*
+ *-----------------------------------------------------------------------------
+ *
+ * FreeBitmap --
+ *
+ *    Free the memory of a CBT bitmap
+ *
+ * Parameter:
+ *    bitmap - input. A CBT bitmap.
+ *
+ * Results:
+ *    An allocated CBT bitmap without initialization.
+ *
+ *-----------------------------------------------------------------------------
+ */
 
 static inline void
 FreeBitmap(CBTBitmap bitmap)
 {
-   if (g_Allocator.deallocate != NULL) {
-      g_Allocator.deallocate(g_Allocator._data, bitmap);
-   } else {
-      free(bitmap);
-   }
+   g_Allocator.deallocate(g_Allocator._data, bitmap);
 }
+
 
 ////////////////////////////////////////////////////////////////////////////////
 //   Trie Functions
 ////////////////////////////////////////////////////////////////////////////////
+
+
+/*
+ *-----------------------------------------------------------------------------
+ *
+ * TrieGetSetBitsInLeaf --
+ *
+ *    The helper function to get the count of set-bits in a leaf node.
+ *
+ * Parameter:
+ *    leaf - input. A leaf node.
+ *    fromOffset - input. Offset to count the set-bits in the leaf.
+ *    toOffset - input. The end of offset to count the set-bits in the leaf.
+ *
+ * Results:
+ *    The count of set-bits.
+ *
+ *-----------------------------------------------------------------------------
+ */
 
 static inline uint16
 TrieGetSetBitsInLeaf(TrieNode leaf, uint16 fromOffset, uint16 toOffset)
@@ -214,6 +349,25 @@ TrieGetSetBitsInLeaf(TrieNode leaf, uint16 fromOffset, uint16 toOffset)
    return cnt;
 }
 
+
+/*
+ *-----------------------------------------------------------------------------
+ *
+ * TrieLeafNodeMergeFlatBitmap --
+ *
+ *    The helper function to merge the flat bitmap to that of a leaf node.
+ *
+ * Parameter:
+ *    destNode - input/output. The leaf node which is merging to.
+ *    flatBitmap - input. The flat bitmap which is merging from.
+ *    stat - input. The statistics instance.
+ *
+ * Results:
+ *    None.
+ *
+ *-----------------------------------------------------------------------------
+ */
+
 static inline void
 TrieLeafNodeMergeFlatBitmap(TrieNode destNode, const char *flatBitmap,
                             TrieStatistics *stat)
@@ -235,6 +389,25 @@ TrieLeafNodeMergeFlatBitmap(TrieNode destNode, const char *flatBitmap,
       }
    }
 }
+
+
+/*
+ *-----------------------------------------------------------------------------
+ *
+ * TrieMerge --
+ *
+ *    Merge two trie nodes recursively.
+ *
+ * Parameter:
+ *    pDestNode- input/output. A pointer to a leaf node which is merging to.
+ *    srcMode- input. A leaf node which is merging from.
+ *    stat - input. The statistics instance.
+ *
+ * Results:
+ *    The error code.
+ *
+ *-----------------------------------------------------------------------------
+ */
 
 static TrieVisitorReturnCode
 TrieMerge(TrieNode *pDestNode, TrieNode srcNode, uint8 height,
@@ -270,13 +443,34 @@ TrieMerge(TrieNode *pDestNode, TrieNode srcNode, uint8 height,
    return ret;
 }
 
+
+/*
+ *-----------------------------------------------------------------------------
+ *
+ * TrieAccept --
+ *
+ *    Accept a trie visitor.
+ *
+ * Parameter:
+ *    pNode- input/output. A pointer to a leaf node.
+ *    height - input. The height of the node in the tree.
+ *    fromAddr - input/output. A pointer to the start address in the scope
+ *    toAddre - input. The end address in the scope
+ *    visitor - input. A pointer to trie visitor instance.
+ *
+ * Results:
+ *    The error code.
+ *
+ *-----------------------------------------------------------------------------
+ */
+
 static TrieVisitorReturnCode
 TrieAccept(TrieNode *pNode, uint8 height, uint64 *fromAddr, uint64 toAddr,
            BlockTrackingSparseBitmapVisitor *visitor)
 {
    TrieVisitorReturnCode ret = TRIE_VISITOR_RET_CONT;
    uint64 nodeAddr;
-   assert(*fromAddr <= toAddr);
+   ASSERT(*fromAddr <= toAddr);
    nodeAddr = *fromAddr & NODE_ADDR_MASK(height);
    if (*pNode == NULL) {
       if (visitor->_visitNullNode == NULL) {
@@ -338,20 +532,51 @@ exit:
    return ret;
 }
 
+
+/*
+ *-----------------------------------------------------------------------------
+ *
+ * TrieMaxHeight  --
+ *
+ *    Calulate the maximum height of the trie by the address.
+ *
+ * Parameter:
+ *    addr - input. The address.
+ *
+ * Results:
+ *    the height.
+ *
+ *-----------------------------------------------------------------------------
+ */
+
 static inline uint8
 TrieMaxHeight(uint64 addr)
 {
    uint8 height = 0;
-   if (addr != 0) {
-      uint8 bits = (sizeof(unsigned long) << 3) - __builtin_clzl((unsigned long)addr);
-      if (bits > ADDR_BITS_IN_LEAF) {
-         height =
-            (bits - ADDR_BITS_IN_LEAF + ADDR_BITS_IN_INNER_NODE - 1) /
-            ADDR_BITS_IN_INNER_NODE;
-      }
+   addr >>= ADDR_BITS_IN_LEAF;
+   while (addr != 0) {
+      addr >>= ADDR_BITS_IN_INNER_NODE;
+      ++height;
    }
    return height;
 }
+
+
+/*
+ *-----------------------------------------------------------------------------
+ *
+ * TrieIndexValidation --
+ *
+ *    Check if the trie index is in range or not.
+ *
+ * Parameter:
+ *    trieIndx - input. The trie index.
+ *
+ * Results:
+ *    Return TRUE if the index is in range.
+ *
+ *-----------------------------------------------------------------------------
+ */
 
 static inline Bool
 TrieIndexValidation(uint8 trieIndex)
@@ -420,7 +645,7 @@ SetBitVisitLeafNode(BlockTrackingSparseBitmapVisitor *visitor,
 {
    Bool *isSet = (Bool *)visitor->_data;
    uint8 byte, bit;
-   assert(fromOffset == toOffset);
+   ASSERT(fromOffset == toOffset);
    GET_BITMAP_BYTE_BIT(fromOffset, byte, bit);
    if ((*isSet = node->_bitmap[byte] & (1u << bit)) == FALSE) {
       node->_bitmap[byte] |= (1u << bit);
@@ -481,10 +706,11 @@ TraverseVisitLeafNode(BlockTrackingSparseBitmapVisitor *visitor,
    uint8 i;
    uint8 byte, bit;
    uint8 toByte, toBit;
+   uint8 *bitmap;
    GET_BITMAP_BYTE_BIT(fromOffset, byte, bit);
    GET_BITMAP_BYTE_BIT(toOffset, toByte, toBit);
 
-   uint8 *bitmap = (uint8 *)node->_bitmap;
+   bitmap = (uint8 *)node->_bitmap;
    for (i = byte, nodeAddr += i * 8 ; i <= toByte ; ++i, nodeAddr += 8) {
       uint8 c = bitmap[i];
       uint8 b = (i == byte) ? bit : 0;
@@ -584,7 +810,7 @@ DeserializeVisitNullNode(BlockTrackingSparseBitmapVisitor *visitor,
    targetNodeAddr = stream->_nodeOffset << ADDR_BITS_IN_LEAF;
    maxNodeAddr = nodeAddr | NODE_VALUE_MASK(height+1);
 
-   assert(targetNodeAddr >= nodeAddr);
+   ASSERT(targetNodeAddr >= nodeAddr);
    if (targetNodeAddr > maxNodeAddr) {
       return TRIE_VISITOR_RET_SKIP_CHILDREN;
    }
@@ -667,6 +893,23 @@ CountLeafVisitLeafNode(BlockTrackingSparseBitmapVisitor *visitor,
 //   CBTBitmap Sparse Bitmap Implementation Functions
 ////////////////////////////////////////////////////////////////////////////////
 
+
+/*
+ *-----------------------------------------------------------------------------
+ *
+ * BlockTrackingSparseBitmapTranslateTrieRetCode  --
+ *
+ *    Translate the trie return code to CBT bitmap error code.
+ *
+ * Parameter:
+ *    trieRetCode - input. The trie return code.
+ *
+ * Results:
+ *    The CBT bitmap error code.
+ *
+ *-----------------------------------------------------------------------------
+ */
+
 CBTBitmapError
 BlockTrackingSparseBitmapTranslateTrieRetCode(TrieVisitorReturnCode trieRetCode)
 {
@@ -692,8 +935,24 @@ BlockTrackingSparseBitmapTranslateTrieRetCode(TrieVisitorReturnCode trieRetCode)
    return ret;
 }
 
-/**
- * accept a visitor
+
+/*
+ *-----------------------------------------------------------------------------
+ *
+ * BlockTrackingSparseBitmapAccept --
+ *
+ *    Sparse bitmap accepts a visitor.
+ *
+ * Parameter:
+ *    bitmap - input. CBT bitmap instance.
+ *    fromAddr - input. The start address in the scope.
+ *    toAddre - input. The end address in the scope.
+ *    visitor - input. A pointer to the visitor instance.
+ *
+ * Results:
+ *    CBT bitmap error code.
+ *
+ *-----------------------------------------------------------------------------
  */
 
 static CBTBitmapError
@@ -709,7 +968,7 @@ BlockTrackingSparseBitmapAccept(CBTBitmap bitmap,
 
    for (; i < MAX_NUM_TRIES && fromAddr <= toAddr ; ++i) {
       trieRetCode =
-         TrieAccept(&bitmap->ries[i], i, &fromAddr, toAddr, visitor);
+         TrieAccept(&bitmap->_tries[i], i, &fromAddr, toAddr, visitor);
       if (trieRetCode != TRIE_VISITOR_RET_CONT &&
           trieRetCode != TRIE_VISITOR_RET_SKIP_CHILDREN) {
          break;
@@ -723,8 +982,25 @@ BlockTrackingSparseBitmapAccept(CBTBitmap bitmap,
    return BlockTrackingSparseBitmapTranslateTrieRetCode(trieRetCode);
 }
 
+
+/*
+ *-----------------------------------------------------------------------------
+ *
+ * BlockTrackingSparseBitmapDeleteT_tries --
+ *
+ *    Delete all t_tries in the bitmap.
+ *
+ * Parameter:
+ *    bitmap - input/output. CBT bitmap instance.
+ *
+ * Results:
+ *    CBT bitmap error code.
+ *
+ *-----------------------------------------------------------------------------
+ */
+
 static CBTBitmapError
-BlockTrackingSparseBitmapDeleteTries(CBTBitmap bitmap)
+BlockTrackingSparseBitmapDeleteT_tries(CBTBitmap bitmap)
 {
    CBTBitmapError ret;
    BlockTrackingSparseBitmapVisitor deleteTrie =
@@ -733,11 +1009,29 @@ BlockTrackingSparseBitmapDeleteTries(CBTBitmap bitmap)
       };
    ret = BlockTrackingSparseBitmapAccept(bitmap, 0, -1, &deleteTrie);
    if (IS_TRIE_STAT_FLAG_MEMORY_ALLOC_ON(bitmap->_stat._flag)) {
-      assert(bitmap->_stat._memoryInUse == sizeof(*bitmap));
+      ASSERT(bitmap->_stat._memoryInUse == sizeof(*bitmap));
    }
    return ret;
 }
 
+
+/*
+ *-----------------------------------------------------------------------------
+ *
+ * BlockTrackingSparseBitmapSetBit --
+ *
+ *    Set a bit in the sparse bitmap.
+ *
+ * Parameter:
+ *    bitmap - input/output. CBT bitmap instance.
+ *    addr - input. The address of the bit.
+ *    isSetBefor - output. The original value of the bit.
+ *
+ * Results:
+ *    CBT bitmap error code.
+ *
+ *-----------------------------------------------------------------------------
+ */
 
 static CBTBitmapError
 BlockTrackingSparseBitmapSetBit(CBTBitmap bitmap, uint64 addr,
@@ -763,6 +1057,25 @@ BlockTrackingSparseBitmapSetBit(CBTBitmap bitmap, uint64 addr,
    }
    return ret;
 }
+
+
+/*
+ *-----------------------------------------------------------------------------
+ *
+ * BlockTrackingSparseBitmapSetBits  --
+ *
+ *    Set bits in a range in the sparse bitmap.
+ *
+ * Parameter:
+ *    bitmap - input/output. CBT bitmap instance.
+ *    fromAddr - input. The start address in the scope.
+ *    toAddre - input. The end address in the scope.
+ *
+ * Results:
+ *    CBT bitmap error code.
+ *
+ *-----------------------------------------------------------------------------
+ */
 
 static CBTBitmapError
 BlockTrackingSparseBitmapSetBits(CBTBitmap bitmap,
@@ -799,6 +1112,11 @@ BlockTrackingSparseBitmapTraverseByBit(CBTBitmap bitmap,
    return BlockTrackingSparseBitmapAccept(bitmap, fromAddr, toAddr, &traverse);
 }
 
+
+/*
+ * The callback data for traverse extents.
+ */
+
 typedef struct {
    uint64 _start;
    uint64 _end;
@@ -808,6 +1126,11 @@ typedef struct {
    void *_extHdlData;
    Bool _extHdlRet;
 } GetExtentsData;
+
+
+/*
+ * The callback of traverse extents.
+ */
 
 static Bool
 GetExtents(void *data, uint64 addr)
@@ -843,6 +1166,27 @@ GetExtents(void *data, uint64 addr)
    return TRUE;
 }
 
+
+/*
+ *-----------------------------------------------------------------------------
+ *
+ * BlockTrackingSparseBitmapTraverseByExtent --
+ *
+ *    Traverse the extents of the sparse bitmap.
+ *
+ * Parameter:
+ *    bitmap - input/output. CBT bitmap instance.
+ *    fromAddr - input. The start address in the scope.
+ *    toAddre - input. The end address in the scope.
+ *    cb - input. The callback fro each extent.
+ *    cbData - input. The callback data.
+ *
+ * Results:
+ *    CBT bitmap error code.
+ *
+ *-----------------------------------------------------------------------------
+ */
+
 static CBTBitmapError
 BlockTrackingSparseBitmapTraverseByExtent(
                                     CBTBitmap bitmap,
@@ -864,6 +1208,23 @@ BlockTrackingSparseBitmapTraverseByExtent(
    return CBT_BMAP_ERR_OK;
 }
 
+
+/*
+ *-----------------------------------------------------------------------------
+ *
+ * BlockTrackingSparseBitmapUpdateStatistics --
+ *
+ *    Update all statistics of the sparse bitmap.
+ *
+ * Parameter:
+ *    bitmap - input/output. CBT bitmap instance.
+ *
+ * Results:
+ *    CBT bitmap error code.
+ *
+ *-----------------------------------------------------------------------------
+ */
+
 static CBTBitmapError
 BlockTrackingSparseBitmapUpdateStatistics(CBTBitmap bitmap)
 {
@@ -871,13 +1232,32 @@ BlockTrackingSparseBitmapUpdateStatistics(CBTBitmap bitmap)
    BlockTrackingSparseBitmapVisitor updateStat =
       {UpdateStatVisitLeafNode, UpdateStatVisitInnerNode, NULL, NULL, NULL,
        &bitmap->_stat};
-   assert(!TRIE_STAT_FLAG_IS_NULL(bitmap->_stat._flag));
+   ASSERT(!TRIE_STAT_FLAG_IS_NULL(bitmap->_stat._flag));
    flag = bitmap->_stat._flag;
    memset(&bitmap->_stat, 0, sizeof(bitmap->_stat));
    bitmap->_stat._memoryInUse = sizeof(*bitmap);
    bitmap->_stat._flag = flag;
    return BlockTrackingSparseBitmapAccept(bitmap, 0, -1, &updateStat);
 }
+
+
+/*
+ *-----------------------------------------------------------------------------
+ *
+ * BlockTrackingSparseBitmapDeserialize --
+ *
+ *    Deserialize the sparse bitmap.
+ *
+ * Parameter:
+ *    bitmap - input/output. CBT bitmap instance.
+ *    stream - input. The input stream.
+ *    streamLen - input. The length of input stream.
+ *
+ * Results:
+ *    CBT bitmap error code.
+ *
+ *-----------------------------------------------------------------------------
+ */
 
 static CBTBitmapError
 BlockTrackingSparseBitmapDeserialize(CBTBitmap bitmap,
@@ -895,6 +1275,25 @@ BlockTrackingSparseBitmapDeserialize(CBTBitmap bitmap,
       };
    return BlockTrackingSparseBitmapAccept(bitmap, 0, -1, &deserialize);
 }
+
+
+/*
+ *-----------------------------------------------------------------------------
+ *
+ * BlockTrackingSparseBitmapSerialize --
+ *
+ *    Serialize the sparse bitmap.
+ *
+ * Parameter:
+ *    bitmap - input. CBT bitmap instance.
+ *    stream - output. The output stream.
+ *    streamLen - input. The length of output stream.
+ *
+ * Results:
+ *    CBT bitmap error code.
+ *
+ *-----------------------------------------------------------------------------
+ */
 
 static CBTBitmapError
 BlockTrackingSparseBitmapSerialize(CBTBitmap bitmap,
@@ -920,6 +1319,22 @@ BlockTrackingSparseBitmapSerialize(CBTBitmap bitmap,
 }
 
 
+/*
+ *-----------------------------------------------------------------------------
+ *
+ * BlockTrackingSparseBitmapMakeTrieStatFlag --
+ *
+ *    Translate the CBT creation flags to be Trie stat flags.
+ *
+ * Parameter:
+ *    mode - input. CBT creation flags.
+ *
+ * Results:
+ *    Trie stat flags.
+ *
+ *-----------------------------------------------------------------------------
+ */
+
 static uint16
 BlockTrackingSparseBitmapMakeTrieStatFlag(uint16 mode)
 {
@@ -940,8 +1355,9 @@ BlockTrackingSparseBitmapMakeTrieStatFlag(uint16 mode)
    return flag;
 }
 
+
 ////////////////////////////////////////////////////////////////////////////////
-//   Public Interface
+//   Public Interface (reference cbtBitmap.h)
 ////////////////////////////////////////////////////////////////////////////////
 
 
@@ -952,7 +1368,14 @@ CBTBitmap_Init(CBTBitmapAllocator *alloc)
       return CBT_BMAP_ERR_REINIT;
    }
    if (alloc != NULL) {
+      if (alloc->allocate == NULL || alloc->deallocate == NULL) {
+         return CBT_BMAP_ERR_INVALID_ARG;
+      }
       g_Allocator = *alloc;
+   } else {
+      g_Allocator.allocate = CBTBitmapDefaultAlloc;
+      g_Allocator.deallocate = CBTBitmapDefaultFree;
+      g_Allocator._data = NULL;
    }
    g_IsInited = TRUE;
    return CBT_BMAP_ERR_OK;
@@ -961,7 +1384,8 @@ CBTBitmap_Init(CBTBitmapAllocator *alloc)
 void
 CBTBitmap_Exit()
 {
-   assert(g_IsInited);
+   ASSERT(g_IsInited);
+   memset(&g_Allocator, 0, sizeof g_Allocator);
    g_IsInited = FALSE;
 }
 
@@ -986,7 +1410,7 @@ void
 CBTBitmap_Destroy(CBTBitmap bitmap)
 {
    if (bitmap != NULL) {
-      BlockTrackingSparseBitmapDeleteTries(bitmap);
+      BlockTrackingSparseBitmapDeleteT_tries(bitmap);
       FreeBitmap(bitmap);
    }
 }
@@ -1070,7 +1494,7 @@ CBTBitmap_Merge(CBTBitmap dest, CBTBitmap src)
 
    stat = (TRIE_STAT_FLAG_IS_NULL(dest->_stat._flag)) ? NULL : &dest->_stat;
    for (i = 0; i < MAX_NUM_TRIES ; ++i) {
-      trieRetCode = TrieMerge(&dest->ries[i], src->ries[i], i, stat);
+      trieRetCode = TrieMerge(&dest->_tries[i], src->_tries[i], i, stat);
       if (trieRetCode != TRIE_VISITOR_RET_CONT &&
           trieRetCode != TRIE_VISITOR_RET_SKIP_CHILDREN) {
          break;
@@ -1138,7 +1562,7 @@ CBTBitmap_GetStreamSize(CBTBitmap bitmap, uint32 *streamLen)
    } else {
       leafCount = bitmap->_stat._leafCount;
    }
-   assert(leafCount <= MAX_NUM_LEAVES);
+   ASSERT(leafCount <= MAX_NUM_LEAVES);
    ++leafCount; // need a terminator
    *streamLen = leafCount * sizeof(BlockTrackingSparseBitmapStream);
    return ret;
@@ -1182,3 +1606,8 @@ CBTBitmap_GetMemoryInUse(CBTBitmap bitmap, uint32 *memoryInUse)
    return CBT_BMAP_ERR_OK;
 }
 
+uint64
+CBTBitmap_GetCapacity()
+{
+   return MAX_NUM_LEAVES * (1ul << ADDR_BITS_IN_LEAF);
+}

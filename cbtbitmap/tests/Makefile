@@ -8,7 +8,7 @@
 #    make run-benchmark
 
 CFLAGS := -g -m64 -Wall -Werror -Wno-unused-but-set-variable -DCBT_BITMAP_UNITTEST
-INC_PATH := -I..
+INC_PATH := -I../../public
 
 BENCHMARK_LOOPCOUNT = 1000000
 
