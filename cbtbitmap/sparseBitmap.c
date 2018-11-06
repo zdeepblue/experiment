@@ -7,6 +7,10 @@
  * CBT Bitmap Sparse Bitmap implementation file
  *
  * It applies a Trie forest as a sparse bitmap to implement all public APIs.
+ *
+ * Design doc:
+ * https://confluence.eng.vmware.com/display/VDDK/CBT+Block+Size#CBTBlockSize-SparseBitmap
+ *
  */
 
 #include "cbtBitmap.h"
@@ -30,11 +34,12 @@
 #endif
 
 
-// definition of maros
+// definition of macros
 #define MAX_NUM_TRIES 6
 #define ADDR_BITS_IN_LEAF 9
 #define ADDR_BITS_IN_INNER_NODE 3
-#define ADDR_BITS_IN_HEIGHT(h) (ADDR_BITS_IN_LEAF+(h-1)*ADDR_BITS_IN_INNER_NODE)
+#define ADDR_BITS_IN_HEIGHT(h) \
+   (ADDR_BITS_IN_LEAF+((h)-1)*ADDR_BITS_IN_INNER_NODE)
 #define NUM_TRIE_WAYS (1u << ADDR_BITS_IN_INNER_NODE)
 #define TRIE_WAY_MASK ((uint64)NUM_TRIE_WAYS-1)
 #define MAX_NUM_LEAVES (1u << ((MAX_NUM_TRIES-1)*ADDR_BITS_IN_INNER_NODE))
@@ -65,27 +70,38 @@ typedef union TrieNode {
 
 #define LEAF_VALUE_MASK ((uint64)sizeof(union TrieNode) * 8 - 1)
 #define NODE_ADDR_MASK(h)        \
-   ((h==0) ? ~LEAF_VALUE_MASK :  \
+   (((h)==0) ? ~LEAF_VALUE_MASK :  \
       ~(((uint64)1ull << ADDR_BITS_IN_HEIGHT(h)) - 1))
 #define NODE_VALUE_MASK(h)  (~NODE_ADDR_MASK(h))
+#define NODE_MAX_ADDR(addr, h) ((addr) | NODE_VALUE_MASK((h)+1))
 
-#define GET_NODE_WAYS(addr, h) ((addr>>ADDR_BITS_IN_HEIGHT(h)) & TRIE_WAY_MASK)
+#define GET_NODE_WAYS(addr, h) \
+   (((addr)>>ADDR_BITS_IN_HEIGHT(h)) & TRIE_WAY_MASK)
 
-#define TRIE_STAT_FLAG_BITSET        1
-#define TRIE_STAT_FLAG_MEMORY_ALLOC (1 << 1)
-#define TRIE_STAT_FLAG_COUNT_LEAF   (1 << 2)
+#define TRIE_STAT_FLAG_BITSET                1
+#define TRIE_STAT_FLAG_MEMORY_ALLOC          (1 << 1)
+#define TRIE_STAT_FLAG_COUNT_STREAM_ITEM     (1 << 2)
+#define TRIE_STAT_FLAG_OOM_AS_COLLAPSED      (1 << 3)
 
 #define TRIE_STAT_FLAG_IS_NULL(f) ((f) == 0)
 #define IS_TRIE_STAT_FLAG_BITSET_ON(f) ((f) & TRIE_STAT_FLAG_BITSET)
 #define IS_TRIE_STAT_FLAG_MEMORY_ALLOC_ON(f) ((f) & TRIE_STAT_FLAG_MEMORY_ALLOC)
-#define IS_TRIE_STAT_FLAG_COUNT_LEAF_ON(f) ((f) & TRIE_STAT_FLAG_COUNT_LEAF)
+#define IS_TRIE_STAT_FLAG_COUNT_STREAM_ITEM_ON(f) \
+   ((f) & TRIE_STAT_FLAG_COUNT_STREAM_ITEM)
+#define IS_TRIE_STAT_FLAG_OOM_AS_COLLAPSED_ON(f) \
+   ((f) & TRIE_STAT_FLAG_OOM_AS_COLLAPSED)
 
+#define TRIE_COLLAPSED_NODE_ADDR ((TrieNode)-1)
+
+#ifndef MAX
+#define MAX(a, b) (((a) > (b)) ? (a) : (b))
+#endif
 
 // definition of data structures
 typedef struct TrieStatistics {
    uint32 _totalSet;
    uint32 _memoryInUse;
-   uint16 _leafCount;
+   uint16 _streamItemCount;
    uint16 _flag;
 } TrieStatistics;
 
@@ -107,15 +123,23 @@ typedef
 #endif
 struct BlockTrackingSparseBitmapStream {
    uint16 _nodeOffset;
-   union TrieNode _node;
+   union {
+      union TrieNode _node;
+      struct {
+         uint64 _addr;
+         uint8 _height;
+      } _collapsedNode;
+   } _payLoad;
 }
 #ifndef CBT_BITMAP_UNITTEST
 #include "vmware_pack_end.h"
 #else
-__attribute__((__packed__)) 
+__attribute__((__packed__))
 #endif
 BlockTrackingSparseBitmapStream;
 
+#define STREAM_ITEM_END ((uint16)-1)
+#define STREAM_ITEM_COLLAPSED_NODE ((uint16)-2)
 
 // visitor pattern
 typedef enum {
@@ -130,21 +154,19 @@ typedef enum {
 struct BlockTrackingSparseBitmapVisitor;
 typedef TrieVisitorReturnCode (*VisitInnerNode) (
       struct BlockTrackingSparseBitmapVisitor *visitor,
-      uint64 nodeAddr, uint8 height, TrieNode node);
+      uint64 nodeAddr, uint8 height, uint64 fromAddr, uint64 toAddr,
+      TrieNode *pNode);
 
 typedef TrieVisitorReturnCode (*VisitLeafNode) (
       struct BlockTrackingSparseBitmapVisitor *visitor,
-      uint64 nodeAddr, uint16 fromOffset, uint16 toOffset, TrieNode node);
-
-typedef TrieVisitorReturnCode (*VisitNullNode) (
-      struct BlockTrackingSparseBitmapVisitor *visitor, uint64 nodeAddr,
-      uint8 height, TrieNode *pNode);
+      uint64 nodeAddr, uint16 fromOffset, uint16 toOffset, TrieNode *pNode);
 
 typedef struct BlockTrackingSparseBitmapVisitor {
    VisitLeafNode _visitLeafNode;
    VisitInnerNode _beforeVisitInnerNode;
    VisitInnerNode _afterVisitInnerNode;
-   VisitNullNode _visitNullNode;
+   VisitInnerNode _visitNullNode;
+   VisitInnerNode _visitCollapsedNode;
    void *_data;
    TrieStatistics *_stat;
 } BlockTrackingSparseBitmapVisitor;
@@ -155,10 +177,54 @@ static Bool g_IsInited;
 static CBTBitmapAllocator g_Allocator;
 
 
+// forward declaration
+
+static inline TrieVisitorReturnCode
+DeleteInnerNode(BlockTrackingSparseBitmapVisitor *visitor,
+                uint64 nodeAddr, uint8 height,
+                uint64 fromAddr, uint64 toAddr,
+                TrieNode *pNode);
+
+static inline TrieVisitorReturnCode
+DeleteLeafNode(BlockTrackingSparseBitmapVisitor *visitor,
+               uint64 nodeAddr, uint16 fromOffset, uint16 toOffset,
+               TrieNode *pNode);
+
+static inline TrieVisitorReturnCode
+DeleteCollapsedNode(BlockTrackingSparseBitmapVisitor *visitor,
+                    uint64 nodeAddr, uint8 height,
+                    uint64 fromAddr, uint64 toAddr,
+                    TrieNode *pNode);
+
+static inline uint16
+TrieGetSetBitsInLeaf(TrieNode leaf, uint16 fromOffset, uint16 toOffset);
+
+static TrieVisitorReturnCode
+TrieAccept(TrieNode *pNode, uint64 nodeAddr, uint8 height,
+           uint64 fromAddr, uint64 toAddr,
+           BlockTrackingSparseBitmapVisitor *visitor);
+
 ////////////////////////////////////////////////////////////////////////////////
 //   Allocate/Free Functions
 ////////////////////////////////////////////////////////////////////////////////
 
+
+/*
+ *-----------------------------------------------------------------------------
+ *
+ * CBTBitmapDefaultAlloc --
+ *
+ *    The default allocator
+ *
+ * Parameter:
+ *    data - input. Customer data
+ *    size - input. The requested allocation size.
+ *
+ * Results:
+ *    The pointer to the allocated chunk or NULL if error.
+ *
+ *-----------------------------------------------------------------------------
+ */
 
 static void *
 CBTBitmapDefaultAlloc(void *data, uint64 size)
@@ -171,6 +237,20 @@ CBTBitmapDefaultAlloc(void *data, uint64 size)
 #endif
 }
 
+
+/*
+ *-----------------------------------------------------------------------------
+ *
+ * CBTBitmapDefaultFree --
+ *
+ *    The default de-allocator
+ *
+ * Parameter:
+ *    data - input. Customer data
+ *    ptr  - input. The pointer to the allocated memory.
+ *
+ *-----------------------------------------------------------------------------
+ */
 static void
 CBTBitmapDefaultFree(void *data, void *ptr)
 {
@@ -180,6 +260,7 @@ CBTBitmapDefaultFree(void *data, void *ptr)
    ASSERT(0);
 #endif
 }
+
 
 /*
  *-----------------------------------------------------------------------------
@@ -209,8 +290,8 @@ AllocateTrieNode(TrieStatistics *stat, Bool isLeaf)
          if (IS_TRIE_STAT_FLAG_MEMORY_ALLOC_ON(stat->_flag)) {
             stat->_memoryInUse += sizeof(*node);
          }
-         if (isLeaf && IS_TRIE_STAT_FLAG_COUNT_LEAF_ON(stat->_flag)) {
-            stat->_leafCount++;
+         if (isLeaf && IS_TRIE_STAT_FLAG_COUNT_STREAM_ITEM_ON(stat->_flag)) {
+            stat->_streamItemCount++;
          }
       }
    }
@@ -229,17 +310,24 @@ AllocateTrieNode(TrieStatistics *stat, Bool isLeaf)
  *    TrieNode - input. The node instance.
  *    stat - input. A pointer to statistics object.
  *
- * Results:
- *    The trie node or NULL if error.
- *
  *-----------------------------------------------------------------------------
  */
 
 static inline void
-FreeTrieNode(TrieNode node, TrieStatistics *stat)
+FreeTrieNode(TrieNode node, Bool isLeaf, TrieStatistics *stat)
 {
-   if (stat != NULL && IS_TRIE_STAT_FLAG_MEMORY_ALLOC_ON(stat->_flag)) {
-      stat->_memoryInUse -= sizeof(*node);
+   if (stat != NULL) {
+      if (IS_TRIE_STAT_FLAG_MEMORY_ALLOC_ON(stat->_flag)) {
+         stat->_memoryInUse -= sizeof(*node);
+      }
+      if (isLeaf) {
+         if (IS_TRIE_STAT_FLAG_COUNT_STREAM_ITEM_ON(stat->_flag)) {
+            stat->_streamItemCount--;
+         }
+         if (IS_TRIE_STAT_FLAG_BITSET_ON(stat->_flag)) {
+            stat->_totalSet -= TrieGetSetBitsInLeaf(node, 0, LEAF_VALUE_MASK);
+         }
+      }
    }
    g_Allocator.deallocate(g_Allocator._data, node);
 }
@@ -284,9 +372,6 @@ AllocateBitmap()
  * Parameter:
  *    bitmap - input. A CBT bitmap.
  *
- * Results:
- *    An allocated CBT bitmap without initialization.
- *
  *-----------------------------------------------------------------------------
  */
 
@@ -300,6 +385,105 @@ FreeBitmap(CBTBitmap bitmap)
 ////////////////////////////////////////////////////////////////////////////////
 //   Trie Functions
 ////////////////////////////////////////////////////////////////////////////////
+
+
+/*
+ *-----------------------------------------------------------------------------
+ *
+ * TrieIsCollapsedNode --
+ *
+ *    The helper function to identify a collapsed node.
+ *
+ * Parameter:
+ *    node - input. The node for the check.
+ *
+ * Results:
+ *    Return true of the node is a collapsed node, otherwise return false.
+ *
+ *-----------------------------------------------------------------------------
+ */
+
+static inline Bool
+TrieIsCollapsedNode(TrieNode node)
+{
+   return node == TRIE_COLLAPSED_NODE_ADDR;
+}
+
+
+/*
+ *-----------------------------------------------------------------------------
+ *
+ * TrieCollapseNode --
+ *
+ *    The helper function to collapse the node.
+ *
+ * Parameter:
+ *    pNode - input/output. A pointer to the node to be collapsed.
+ *    nodeAddr - input. The node address.
+ *    height - input. The trie height of the node.
+ *    state - input. A pointer to the statistics object
+ *
+ *-----------------------------------------------------------------------------
+ */
+
+static inline void
+TrieCollapseNode(TrieNode *pNode, uint64 nodeAddr, uint8 height,
+                 TrieStatistics *stat)
+{
+   TrieNode node;
+   ASSERT(pNode != NULL);
+   node = *pNode;
+   if (TrieIsCollapsedNode(node)) {
+      return;
+   }
+   if (node != NULL) {
+      FreeTrieNode(*pNode, height == 0, stat);
+   }
+   *pNode = TRIE_COLLAPSED_NODE_ADDR;
+   if (stat != NULL) {
+      if (IS_TRIE_STAT_FLAG_COUNT_STREAM_ITEM_ON(stat->_flag)) {
+         stat->_streamItemCount++;
+         if (node != NULL && height > 0) {
+            stat->_streamItemCount -= NUM_TRIE_WAYS;
+         }
+      }
+      if (IS_TRIE_STAT_FLAG_BITSET_ON(stat->_flag) &&
+          (node == NULL || height == 0)) {
+         stat->_totalSet += NODE_MAX_ADDR(nodeAddr, height) - nodeAddr + 1;
+      }
+   }
+}
+
+
+/*
+ *-----------------------------------------------------------------------------
+ *
+ * TrieIsFullNode --
+ *
+ *    The helper function to identify a full node.
+ *
+ *    Full node means all bits under that node are set.
+ *
+ * Parameter:
+ *    node - input. The node for the check.
+ *
+ * Results:
+ *    Return true of the node is a full node, otherwise return false.
+ *
+ *-----------------------------------------------------------------------------
+ */
+
+static inline Bool
+TrieIsFullNode(TrieNode node)
+{
+   uint8 i;
+   for (i = 0 ; i < NUM_TRIE_WAYS ; ++i) {
+      if (!TrieIsCollapsedNode(node->_children[i])) {
+         return FALSE;
+      }
+   }
+   return TRUE;
+}
 
 
 /*
@@ -394,59 +578,6 @@ TrieLeafNodeMergeFlatBitmap(TrieNode destNode, const char *flatBitmap,
 /*
  *-----------------------------------------------------------------------------
  *
- * TrieMerge --
- *
- *    Merge two trie nodes recursively.
- *
- * Parameter:
- *    pDestNode- input/output. A pointer to a leaf node which is merging to.
- *    srcMode- input. A leaf node which is merging from.
- *    stat - input. The statistics instance.
- *
- * Results:
- *    The error code.
- *
- *-----------------------------------------------------------------------------
- */
-
-static TrieVisitorReturnCode
-TrieMerge(TrieNode *pDestNode, TrieNode srcNode, uint8 height,
-          TrieStatistics *stat)
-{
-   TrieVisitorReturnCode ret = TRIE_VISITOR_RET_CONT;
-   if (srcNode == NULL) {
-      // nothing to merge from src
-      return TRIE_VISITOR_RET_CONT;
-   }
-   if (*pDestNode == NULL) {
-      *pDestNode = AllocateTrieNode(stat, height == 0);
-      if (*pDestNode == NULL) {
-         return TRIE_VISITOR_RET_OUT_OF_MEM;
-      }
-   }
-   if (height == 0) {
-      // leaf
-      TrieLeafNodeMergeFlatBitmap(*pDestNode, srcNode->_bitmap, stat);
-   } else {
-      // inner node
-      uint8 way;
-      for (way = 0 ; way < NUM_TRIE_WAYS ; ++way) {
-         ret = TrieMerge(&(*pDestNode)->_children[way],
-                         srcNode->_children[way],
-                         height-1, stat);
-         if (ret != TRIE_VISITOR_RET_CONT &&
-             ret != TRIE_VISITOR_RET_SKIP_CHILDREN) {
-            return ret;
-         }
-      }
-   }
-   return ret;
-}
-
-
-/*
- *-----------------------------------------------------------------------------
- *
  * TrieAccept --
  *
  *    Accept a trie visitor.
@@ -465,32 +596,43 @@ TrieMerge(TrieNode *pDestNode, TrieNode srcNode, uint8 height,
  */
 
 static TrieVisitorReturnCode
-TrieAccept(TrieNode *pNode, uint8 height, uint64 *fromAddr, uint64 toAddr,
+TrieAccept(TrieNode *pNode, uint64 nodeAddr, uint8 height,
+           uint64 fromAddr, uint64 toAddr,
            BlockTrackingSparseBitmapVisitor *visitor)
 {
    TrieVisitorReturnCode ret = TRIE_VISITOR_RET_CONT;
-   uint64 nodeAddr;
-   ASSERT(*fromAddr <= toAddr);
-   nodeAddr = *fromAddr & NODE_ADDR_MASK(height);
+   ASSERT(fromAddr <= toAddr);
+   ASSERT(nodeAddr <= toAddr);
+
    if (*pNode == NULL) {
       if (visitor->_visitNullNode == NULL) {
          // ignore NULL node and continue the traverse
          goto exit;
       }
-      if ((ret = visitor->_visitNullNode(visitor, nodeAddr, height, pNode))
+      if ((ret = visitor->_visitNullNode(visitor, nodeAddr, height,
+                                         fromAddr, toAddr, pNode))
             != TRIE_VISITOR_RET_CONT) {
          goto exit;
       }
    }
-   if (height == 0) {
+   if (TrieIsCollapsedNode(*pNode)) {
+      // collapsed node
+      if (visitor->_visitCollapsedNode != NULL) {
+         if ((ret = visitor->_visitCollapsedNode(visitor, nodeAddr, height,
+                                                 fromAddr, toAddr, pNode))
+               != TRIE_VISITOR_RET_CONT) {
+            goto exit;
+         }
+      }
+   } else if (height == 0) {
       // leaf
-      uint16 fromOffset = *fromAddr & LEAF_VALUE_MASK;
+      uint16 fromOffset = MAX(nodeAddr, fromAddr) & LEAF_VALUE_MASK;
       uint16 toOffset =
-         (toAddr > (*fromAddr | LEAF_VALUE_MASK)) ?
+         (toAddr > NODE_MAX_ADDR(nodeAddr, height)) ?
                 LEAF_VALUE_MASK : toAddr & LEAF_VALUE_MASK;
       if (visitor->_visitLeafNode != NULL) {
          if ((ret = visitor->_visitLeafNode(visitor, nodeAddr,
-                                            fromOffset, toOffset, *pNode))
+                                            fromOffset, toOffset, pNode))
                != TRIE_VISITOR_RET_CONT) {
             goto exit;
          }
@@ -498,37 +640,122 @@ TrieAccept(TrieNode *pNode, uint8 height, uint64 *fromAddr, uint64 toAddr,
    } else {
       // inner node
       uint8 way;
+      uint64 chldNodeAddr;
       if (visitor->_beforeVisitInnerNode != NULL) {
          if ((ret = visitor->_beforeVisitInnerNode(visitor, nodeAddr, height,
-                                                   *pNode))
+                                                   fromAddr, toAddr, pNode))
                != TRIE_VISITOR_RET_CONT) {
             goto exit;
          }
       }
-      for (way = GET_NODE_WAYS(nodeAddr, height);
-           way < NUM_TRIE_WAYS && *fromAddr <= toAddr;
-           ++way) {
-         ret = TrieAccept(&(*pNode)->_children[way], height-1, fromAddr, toAddr,
-                          visitor);
+      for (way = GET_NODE_WAYS(MAX(fromAddr, nodeAddr), height),
+           chldNodeAddr =
+              (nodeAddr & ~(TRIE_WAY_MASK << ADDR_BITS_IN_HEIGHT(height))) |
+              (way << ADDR_BITS_IN_HEIGHT(height));
+           way < NUM_TRIE_WAYS && chldNodeAddr <= toAddr;
+           ++way, chldNodeAddr += NODE_VALUE_MASK(height) + 1) {
+         ret = TrieAccept(&(*pNode)->_children[way], chldNodeAddr, height-1,
+                          fromAddr, toAddr, visitor);
          if (ret != TRIE_VISITOR_RET_CONT &&
              ret != TRIE_VISITOR_RET_SKIP_CHILDREN) {
-            // fromAddr has been updated in the previous recursive call
-            // so just return here
-            return ret;
+            goto exit;
          }
       }
       if (visitor->_afterVisitInnerNode != NULL) {
          if ((ret = visitor->_afterVisitInnerNode(visitor, nodeAddr, height,
-                                                  *pNode))
+                                                  fromAddr, toAddr, pNode))
                != TRIE_VISITOR_RET_CONT) {
             goto exit;
          }
       }
    }
 exit:
-   // update fromAddr for next node in traverse
-   *fromAddr = nodeAddr | NODE_VALUE_MASK(height+1);
-   ++(*fromAddr);
+   return ret;
+}
+
+
+/*
+ *-----------------------------------------------------------------------------
+ *
+ * TrieMerge --
+ *
+ *    Merge two trie nodes recursively.
+ *
+ * Parameter:
+ *    pDestNode- input/output. A pointer to a leaf node which is merging to.
+ *    srcMode- input. A leaf node which is merging from.
+ *    stat - input. The statistics instance.
+ *
+ * Results:
+ *    The error code.
+ *
+ *-----------------------------------------------------------------------------
+ */
+
+static TrieVisitorReturnCode
+TrieMerge(TrieNode *pDestNode, TrieNode srcNode,
+          uint64 nodeAddr, uint8 height,
+          TrieStatistics *stat)
+{
+   TrieVisitorReturnCode ret = TRIE_VISITOR_RET_CONT;
+   if (srcNode == NULL || TrieIsCollapsedNode(*pDestNode)) {
+      // nothing to merge from src
+      goto exit;
+   }
+
+   if (TrieIsCollapsedNode(srcNode)) {
+      // free the trie
+      BlockTrackingSparseBitmapVisitor deleteTrie = {
+         DeleteLeafNode,
+         NULL,
+         DeleteInnerNode,
+         NULL,
+         DeleteCollapsedNode,
+         NULL,
+         stat
+      };
+      TrieAccept(pDestNode, nodeAddr,  height, 0, -1, &deleteTrie);
+      *pDestNode = NULL;
+      // collapse the dest node
+      TrieCollapseNode(pDestNode, nodeAddr, height, stat);
+      goto exit;
+   }
+
+   if (*pDestNode == NULL) {
+      *pDestNode = AllocateTrieNode(stat, height == 0);
+      if (*pDestNode == NULL) {
+         if (stat != NULL &&
+             IS_TRIE_STAT_FLAG_OOM_AS_COLLAPSED_ON(stat->_flag)) {
+            TrieCollapseNode(pDestNode, nodeAddr, height, stat);
+         } else {
+            ret = TRIE_VISITOR_RET_OUT_OF_MEM;
+         }
+         goto exit;
+      }
+   }
+
+   if (height == 0) {
+      // leaf
+      TrieLeafNodeMergeFlatBitmap(*pDestNode, srcNode->_bitmap, stat);
+   } else {
+      // inner node
+      uint8 way;
+      uint64 chldNodeAddr;
+      for (way = 0, chldNodeAddr = nodeAddr;
+           way < NUM_TRIE_WAYS;
+           ++way, chldNodeAddr += NODE_VALUE_MASK(height) + 1) {
+         ret = TrieMerge(&(*pDestNode)->_children[way], srcNode->_children[way],
+                         chldNodeAddr, height-1, stat);
+         if (ret != TRIE_VISITOR_RET_CONT &&
+             ret != TRIE_VISITOR_RET_SKIP_CHILDREN) {
+            goto exit;
+         }
+      }
+   }
+   if (TrieIsFullNode(*pDestNode)) {
+      TrieCollapseNode(pDestNode, nodeAddr, height, stat);
+   }
+exit:
    return ret;
 }
 
@@ -583,11 +810,53 @@ TrieIndexValidation(uint8 trieIndex)
 {
    return trieIndex < MAX_NUM_TRIES;
 }
-   
+
 
 ////////////////////////////////////////////////////////////////////////////////
 //   Visitors
 ////////////////////////////////////////////////////////////////////////////////
+
+
+/**
+ *  A vistor to delete trie
+ */
+
+static inline TrieVisitorReturnCode
+DeleteInnerNode(BlockTrackingSparseBitmapVisitor *visitor,
+                uint64 nodeAddr, uint8 height,
+                uint64 fromAddr, uint64 toAddr,
+                TrieNode *pNode)
+{
+   FreeTrieNode(*pNode, height == 0, visitor->_stat);
+   return TRIE_VISITOR_RET_CONT;
+}
+
+static inline TrieVisitorReturnCode
+DeleteLeafNode(BlockTrackingSparseBitmapVisitor *visitor,
+               uint64 nodeAddr, uint16 fromOffset, uint16 toOffset,
+               TrieNode *pNode)
+{
+   FreeTrieNode(*pNode, TRUE, visitor->_stat);
+   return TRIE_VISITOR_RET_CONT;
+}
+
+static inline TrieVisitorReturnCode
+DeleteCollapsedNode(BlockTrackingSparseBitmapVisitor *visitor,
+                    uint64 nodeAddr, uint8 height,
+                    uint64 fromAddr, uint64 toAddr,
+                    TrieNode *pNode)
+{
+   if (visitor->_stat != NULL) {
+      if (IS_TRIE_STAT_FLAG_COUNT_STREAM_ITEM_ON(visitor->_stat->_flag)) {
+         visitor->_stat->_streamItemCount--;
+      }
+      if (IS_TRIE_STAT_FLAG_BITSET_ON(visitor->_stat->_flag)) {
+         visitor->_stat->_totalSet -=
+            NODE_MAX_ADDR(nodeAddr, height) - nodeAddr + 1;
+      }
+   }
+   return TRIE_VISITOR_RET_CONT;
+}
 
 
 /**
@@ -597,14 +866,24 @@ TrieIndexValidation(uint8 trieIndex)
 static inline TrieVisitorReturnCode
 AllocateNodeVisitNullNode(BlockTrackingSparseBitmapVisitor *visitor,
                           uint64 nodeAddr, uint8 height,
+                          uint64 fromAddr, uint64 toAddr,
                           TrieNode *pNode)
 {
    *pNode = AllocateTrieNode(visitor->_stat, height == 0);
    if (*pNode == NULL) {
-      return TRIE_VISITOR_RET_OUT_OF_MEM;
+      if (visitor->_stat != NULL &&
+          IS_TRIE_STAT_FLAG_OOM_AS_COLLAPSED_ON(visitor->_stat->_flag)) {
+         // cannot allocate memory for node breaks the business.
+         // In order to continue recording changes without data loss,
+         // collapse the node to treate the sub-trie of node is full
+         TrieCollapseNode(pNode, nodeAddr, height, visitor->_stat);
+      } else {
+         return TRIE_VISITOR_RET_OUT_OF_MEM;
+      }
    }
    return TRIE_VISITOR_RET_CONT;
 }
+
 
 /**
  * A visitor to query set bit
@@ -613,6 +892,7 @@ AllocateNodeVisitNullNode(BlockTrackingSparseBitmapVisitor *visitor,
 static inline TrieVisitorReturnCode
 QueryBitVisitNullNode(BlockTrackingSparseBitmapVisitor *visitor,
                       uint64 nodeAddr, uint8 height,
+                      uint64 fromAddr, uint64 toAddr,
                       TrieNode *pNode)
 {
    Bool *isSet = (Bool *)visitor->_data;
@@ -624,12 +904,25 @@ QueryBitVisitNullNode(BlockTrackingSparseBitmapVisitor *visitor,
 static inline TrieVisitorReturnCode
 QueryBitVisitLeafNode(BlockTrackingSparseBitmapVisitor *visitor,
                       uint64 nodeAddr, uint16 fromOffset, uint16 toOffset,
-                      TrieNode node)
+                      TrieNode *pNode)
 {
    Bool *isSet = (Bool *)visitor->_data;
    uint8 byte, bit;
    GET_BITMAP_BYTE_BIT(fromOffset, byte, bit);
-   *isSet = node->_bitmap[byte] & (1u << bit);
+   *isSet = (*pNode)->_bitmap[byte] & (1u << bit);
+   return TRIE_VISITOR_RET_END;
+}
+
+static inline TrieVisitorReturnCode
+QueryBitVisitCollapsedNode(BlockTrackingSparseBitmapVisitor *visitor,
+                           uint64 nodeAddr, uint8 height,
+                           uint64 fromAddr, uint64 toAddr,
+                           TrieNode *pNode)
+{
+   Bool *isSet = (Bool *)visitor->_data;
+   *isSet = TRUE;
+   ASSERT(fromAddr == toAddr);
+   ASSERT(fromAddr >= nodeAddr && fromAddr <= NODE_MAX_ADDR(nodeAddr, height));
    return TRIE_VISITOR_RET_END;
 }
 
@@ -641,50 +934,133 @@ QueryBitVisitLeafNode(BlockTrackingSparseBitmapVisitor *visitor,
 static inline TrieVisitorReturnCode
 SetBitVisitLeafNode(BlockTrackingSparseBitmapVisitor *visitor,
                     uint64 nodeAddr, uint16 fromOffset, uint16 toOffset,
-                    TrieNode node)
+                    TrieNode *pNode)
 {
    Bool *isSet = (Bool *)visitor->_data;
    uint8 byte, bit;
    ASSERT(fromOffset == toOffset);
    GET_BITMAP_BYTE_BIT(fromOffset, byte, bit);
-   if ((*isSet = node->_bitmap[byte] & (1u << bit)) == FALSE) {
-      node->_bitmap[byte] |= (1u << bit);
+   if ((*isSet = (*pNode)->_bitmap[byte] & (1u << bit)) == FALSE) {
+      (*pNode)->_bitmap[byte] |= (1u << bit);
+      if (visitor->_stat != NULL &&
+          IS_TRIE_STAT_FLAG_BITSET_ON(visitor->_stat->_flag)) {
+         visitor->_stat->_totalSet++;
+      }
+   }
+   if (TrieIsFullNode(*pNode)) {
+      TrieCollapseNode(pNode, nodeAddr, 0, visitor->_stat);
+      return TRIE_VISITOR_RET_CONT;
+   }
+   return TRIE_VISITOR_RET_END;
+}
+
+static inline TrieVisitorReturnCode
+SetBitPostVisitInnerNode(BlockTrackingSparseBitmapVisitor *visitor,
+                         uint64 nodeAddr, uint8 height,
+                         uint64 fromAddr, uint64 toAddr,
+                         TrieNode *pNode)
+{
+   // bottom up collapse
+   if (TrieIsFullNode(*pNode)) {
+      TrieCollapseNode(pNode, nodeAddr, height, visitor->_stat);
+      return TRIE_VISITOR_RET_CONT;
    }
    return TRIE_VISITOR_RET_END;
 }
 
 
-/** 
+/**
  * A visitor to set bits in range
  */
 
 static inline TrieVisitorReturnCode
+SetBitsVisitNullNode(BlockTrackingSparseBitmapVisitor *visitor,
+                     uint64 nodeAddr, uint8 height,
+                     uint64 fromAddr, uint64 toAddr, TrieNode *pNode)
+{
+   if (nodeAddr >= fromAddr && NODE_MAX_ADDR(nodeAddr, height) <= toAddr) {
+      // No need to allocate node since the all addresses in the node should
+      // be set. Collapse it directly.
+      TrieCollapseNode(pNode, nodeAddr, height, visitor->_stat);
+      return TRIE_VISITOR_RET_CONT;
+   }
+   return AllocateNodeVisitNullNode(visitor, nodeAddr, height,
+                                    fromAddr, toAddr, pNode);
+}
+
+static inline TrieVisitorReturnCode
 SetBitsVisitLeafNode(BlockTrackingSparseBitmapVisitor *visitor,
                      uint64 nodeAddr, uint16 fromOffset, uint16 toOffset,
-                     TrieNode node)
+                     TrieNode *pNode)
 {
    uint8 byte, bit;
    uint8 toByte, toBit;
-   if (visitor->_stat != NULL && IS_TRIE_STAT_FLAG_BITSET_ON(visitor->_stat->_flag)) {
+   if (visitor->_stat != NULL &&
+       IS_TRIE_STAT_FLAG_BITSET_ON(visitor->_stat->_flag)) {
       visitor->_stat->_totalSet +=
          (toOffset-fromOffset+1) -
-         TrieGetSetBitsInLeaf(node, fromOffset, toOffset);
+         TrieGetSetBitsInLeaf(*pNode, fromOffset, toOffset);
    }
    GET_BITMAP_BYTE_BIT(fromOffset, byte, bit);
    if (toOffset == fromOffset) {
       // fast pass for special case
-      node->_bitmap[byte] |= (1u << bit);
+      (*pNode)->_bitmap[byte] |= (1u << bit);
       return TRIE_VISITOR_RET_CONT;
    }
    GET_BITMAP_BYTE_BIT(toOffset, toByte, toBit);
    // fill bits in the middle bytes
    if (toByte - byte > 1) {
-      memset(&node->_bitmap[byte+1], (int)-1, toByte - byte - 1);
+      memset(&(*pNode)->_bitmap[byte+1], (int)-1, toByte - byte - 1);
    }
    // fill the bits greater and equal to the bit
-   node->_bitmap[byte] |= ~((1u<<bit)-1);
+   (*pNode)->_bitmap[byte] |= ~((1u<<bit)-1);
    // fill the bits smaller and equal to the max bit
-   node->_bitmap[toByte] |= ~((~((1u<<toBit)-1)) << 1);
+   (*pNode)->_bitmap[toByte] |= ~((~((1u<<toBit)-1)) << 1);
+
+   if (TrieIsFullNode(*pNode)) {
+      TrieCollapseNode(pNode, nodeAddr, 0, visitor->_stat);
+   }
+   return TRIE_VISITOR_RET_CONT;
+}
+
+
+static inline TrieVisitorReturnCode
+SetBitsPreVisitInnerNode(BlockTrackingSparseBitmapVisitor *visitor,
+                         uint64 nodeAddr, uint8 height,
+                         uint64 fromAddr, uint64 toAddr,
+                         TrieNode *pNode)
+{
+   // top down collapse
+   if (nodeAddr >= fromAddr && NODE_MAX_ADDR(nodeAddr, height) <= toAddr) {
+      // free the trie
+      BlockTrackingSparseBitmapVisitor deleteTrie = {
+         DeleteLeafNode,
+         NULL,
+         DeleteInnerNode,
+         NULL,
+         DeleteCollapsedNode,
+         NULL,
+         visitor->_stat
+      };
+      TrieAccept(pNode, nodeAddr, height, fromAddr, toAddr, &deleteTrie);
+      *pNode = NULL;
+      // collapse itself
+      TrieCollapseNode(pNode, nodeAddr, height, visitor->_stat);
+      return TRIE_VISITOR_RET_SKIP_CHILDREN;
+   }
+   return TRIE_VISITOR_RET_CONT;
+}
+
+static inline TrieVisitorReturnCode
+SetBitsPostVisitInnerNode(BlockTrackingSparseBitmapVisitor *visitor,
+                          uint64 nodeAddr, uint8 height,
+                          uint64 fromAddr, uint64 toAddr,
+                          TrieNode *pNode)
+{
+   // bottom up collapse
+   if (TrieIsFullNode(*pNode)) {
+      TrieCollapseNode(pNode, nodeAddr, height, visitor->_stat);
+   }
    return TRIE_VISITOR_RET_CONT;
 }
 
@@ -696,7 +1072,7 @@ SetBitsVisitLeafNode(BlockTrackingSparseBitmapVisitor *visitor,
 static inline TrieVisitorReturnCode
 TraverseVisitLeafNode(BlockTrackingSparseBitmapVisitor *visitor,
                       uint64 nodeAddr, uint16 fromOffset, uint16 toOffset,
-                      TrieNode node)
+                      TrieNode *pNode)
 {
    BlockTrackingBitmapCallbackData *data =
       (BlockTrackingBitmapCallbackData*)visitor->_data;
@@ -710,7 +1086,7 @@ TraverseVisitLeafNode(BlockTrackingSparseBitmapVisitor *visitor,
    GET_BITMAP_BYTE_BIT(fromOffset, byte, bit);
    GET_BITMAP_BYTE_BIT(toOffset, toByte, toBit);
 
-   bitmap = (uint8 *)node->_bitmap;
+   bitmap = (uint8 *)(*pNode)->_bitmap;
    for (i = byte, nodeAddr += i * 8 ; i <= toByte ; ++i, nodeAddr += 8) {
       uint8 c = bitmap[i];
       uint8 b = (i == byte) ? bit : 0;
@@ -730,6 +1106,154 @@ TraverseVisitLeafNode(BlockTrackingSparseBitmapVisitor *visitor,
    return TRIE_VISITOR_RET_CONT;
 }
 
+static inline TrieVisitorReturnCode
+TraverseVisitCollapsedNode(BlockTrackingSparseBitmapVisitor *visitor,
+                           uint64 nodeAddr, uint8 height,
+                           uint64 fromAddr, uint64 toAddr,
+                           TrieNode *pNode)
+{
+   BlockTrackingBitmapCallbackData *data =
+      (BlockTrackingBitmapCallbackData*)visitor->_data;
+   CBTBitmapAccessBitCB cb =
+      (CBTBitmapAccessBitCB)data->_cb;
+   uint64 nodeMaxAddr = NODE_MAX_ADDR(nodeAddr, height);
+   uint64 start, end;
+
+   ASSERT(fromAddr <= toAddr);
+
+   start = (fromAddr >= nodeAddr) ? fromAddr : nodeAddr;
+   end = (toAddr <= nodeMaxAddr) ? toAddr : nodeMaxAddr;
+   for ( ; start <= end ; ++start) {
+      if (!cb(data->_cbData, start)) {
+         return TRIE_VISITOR_RET_ABORT;
+      }
+   }
+   return TRIE_VISITOR_RET_CONT;
+}
+
+
+/**
+ * A visitor to traverse extent
+ */
+
+
+/*
+ * The callback data for traverse extents.
+ */
+
+typedef struct {
+   uint64 _extStart;
+   uint64 _extEnd;
+   void *_extHdlData;
+} GetExtentsData;
+
+static inline TrieVisitorReturnCode
+TraverseExtVisitLeafNode(BlockTrackingSparseBitmapVisitor *visitor,
+                         uint64 nodeAddr, uint16 fromOffset, uint16 toOffset,
+                         TrieNode *pNode)
+{
+   BlockTrackingBitmapCallbackData *data =
+      (BlockTrackingBitmapCallbackData*)visitor->_data;
+   GetExtentsData *extData = (GetExtentsData*)data->_cbData;
+   CBTBitmapAccessExtentCB cb = (CBTBitmapAccessExtentCB)data->_cb;
+
+   uint8 i;
+   uint8 byte, bit;
+   uint8 toByte, toBit;
+   uint8 *bitmap;
+   GET_BITMAP_BYTE_BIT(fromOffset, byte, bit);
+   GET_BITMAP_BYTE_BIT(toOffset, toByte, toBit);
+
+
+   bitmap = (uint8 *)(*pNode)->_bitmap;
+   for (i = byte, nodeAddr += i * 8 ; i <= toByte ; ++i, nodeAddr += 8) {
+      uint8 c = bitmap[i];
+      uint8 b = (i == byte) ? bit : 0;
+      uint8 e = (i == toByte) ? toBit : 7;
+      c >>= b;
+      while ((c > 0 || extData->_extStart != -1) && b <= e) {
+         if ((c & 0x1) > 0) {
+            // bit is set
+            if (extData->_extStart == -1) {
+               extData->_extStart = nodeAddr+b;
+            }
+            extData->_extEnd = nodeAddr+b;
+         } else {
+            // bit is unset
+            if (extData->_extStart != -1) {
+               if (!cb(extData->_extHdlData,
+                       extData->_extStart, extData->_extEnd)) {
+                  return TRIE_VISITOR_RET_ABORT;
+               }
+               extData->_extStart = -1;
+               extData->_extEnd = -1;
+            }
+         }
+         c >>= 1;
+         ++b;
+      }
+   }
+   return TRIE_VISITOR_RET_CONT;
+}
+
+static inline TrieVisitorReturnCode
+TraverseExtVisitNullNode(BlockTrackingSparseBitmapVisitor *visitor,
+                         uint64 nodeAddr, uint8 height,
+                         uint64 fromAddr, uint64 toAddr,
+                         TrieNode *pNode)
+{
+   BlockTrackingBitmapCallbackData *data =
+      (BlockTrackingBitmapCallbackData*)visitor->_data;
+   GetExtentsData *extData = (GetExtentsData*)data->_cbData;
+   CBTBitmapAccessExtentCB cb = (CBTBitmapAccessExtentCB)data->_cb;
+
+   if (extData->_extStart != -1) {
+      if (!cb(extData->_extHdlData, extData->_extStart, extData->_extEnd)) {
+         return TRIE_VISITOR_RET_ABORT;
+      }
+      extData->_extStart = -1;
+      extData->_extEnd = -1;
+   }
+   return TRIE_VISITOR_RET_SKIP_CHILDREN;
+}
+
+static inline TrieVisitorReturnCode
+TraverseExtVisitCollapsedNode(BlockTrackingSparseBitmapVisitor *visitor,
+                              uint64 nodeAddr, uint8 height,
+                              uint64 fromAddr, uint64 toAddr,
+                              TrieNode *pNode)
+{
+   BlockTrackingBitmapCallbackData *data =
+      (BlockTrackingBitmapCallbackData*)visitor->_data;
+   GetExtentsData *extData = (GetExtentsData*)data->_cbData;
+   CBTBitmapAccessExtentCB cb = (CBTBitmapAccessExtentCB)data->_cb;
+
+   uint64 nodeMaxAddr = NODE_MAX_ADDR(nodeAddr, height);
+
+   ASSERT(fromAddr <= toAddr);
+   if (fromAddr >= nodeAddr) {
+      // the begin of traverse
+      ASSERT(extData->_extStart == -1);
+      extData->_extStart = fromAddr;
+   } else {
+      if (extData->_extStart == -1) {
+         extData->_extStart = nodeAddr;
+      }
+   }
+   if (toAddr <= nodeMaxAddr) {
+      // the end of traverse
+      ASSERT(extData->_extStart != -1);
+      if (!cb(extData->_extHdlData, extData->_extStart, toAddr)) {
+         return TRIE_VISITOR_RET_ABORT;
+      }
+      extData->_extStart = -1;
+      extData->_extEnd = -1;
+   } else {
+      extData->_extEnd = nodeMaxAddr;
+   }
+   return TRIE_VISITOR_RET_CONT;
+}
+
 
 /**
  *  A vistor to update statistics
@@ -737,10 +1261,12 @@ TraverseVisitLeafNode(BlockTrackingSparseBitmapVisitor *visitor,
 
 static inline TrieVisitorReturnCode
 UpdateStatVisitInnerNode(BlockTrackingSparseBitmapVisitor *visitor,
-                         uint64 nodeAddr, uint8 height, TrieNode node)
+                         uint64 nodeAddr, uint8 height,
+                         uint64 fromAddr, uint64 toAddr,
+                         TrieNode *pNode)
 {
    if (IS_TRIE_STAT_FLAG_MEMORY_ALLOC_ON(visitor->_stat->_flag)) {
-      visitor->_stat->_memoryInUse += sizeof(*node);
+      visitor->_stat->_memoryInUse += sizeof(**pNode);
    }
    return TRIE_VISITOR_RET_CONT;
 }
@@ -748,40 +1274,34 @@ UpdateStatVisitInnerNode(BlockTrackingSparseBitmapVisitor *visitor,
 static inline TrieVisitorReturnCode
 UpdateStatVisitLeafNode(BlockTrackingSparseBitmapVisitor *visitor,
                         uint64 nodeAddr, uint16 fromOffset,
-                        uint16 toOffset, TrieNode node)
+                        uint16 toOffset, TrieNode *pNode)
 {
    TrieStatistics *stat = visitor->_stat;
    if (IS_TRIE_STAT_FLAG_BITSET_ON(stat->_flag)) {
-      stat->_totalSet += TrieGetSetBitsInLeaf(node, fromOffset, toOffset);
+      stat->_totalSet += TrieGetSetBitsInLeaf(*pNode, fromOffset, toOffset);
    }
    if (IS_TRIE_STAT_FLAG_MEMORY_ALLOC_ON(stat->_flag)) {
-      stat->_memoryInUse += sizeof(*node);
+      stat->_memoryInUse += sizeof(**pNode);
    }
-   if (IS_TRIE_STAT_FLAG_COUNT_LEAF_ON(stat->_flag)) {
-      stat->_leafCount++;
+   if (IS_TRIE_STAT_FLAG_COUNT_STREAM_ITEM_ON(stat->_flag)) {
+      stat->_streamItemCount++;
    }
    return TRIE_VISITOR_RET_CONT;
 }
 
-
-/**
- *  A vistor to delete trie
- */
-
 static inline TrieVisitorReturnCode
-DeleteInnerNode(BlockTrackingSparseBitmapVisitor *visitor,
-                uint64 nodeAddr, uint8 height, TrieNode node)
+UpdateStateVisitCollapsedNode(BlockTrackingSparseBitmapVisitor *visitor,
+                              uint64 nodeAddr, uint8 height,
+                              uint64 fromAddr, uint64 toAddr,
+                              TrieNode *pNode)
 {
-   FreeTrieNode(node, visitor->_stat);
-   return TRIE_VISITOR_RET_CONT;
-}
-
-static inline TrieVisitorReturnCode
-DeleteLeafNode(BlockTrackingSparseBitmapVisitor *visitor,
-               uint64 nodeAddr, uint16 fromOffset, uint16 toOffset,
-               TrieNode node)
-{
-   FreeTrieNode(node, visitor->_stat);
+   TrieStatistics *stat = visitor->_stat;
+   if (IS_TRIE_STAT_FLAG_BITSET_ON(stat->_flag)) {
+      stat->_totalSet += NODE_MAX_ADDR(nodeAddr, height) - nodeAddr + 1;
+   }
+   if (IS_TRIE_STAT_FLAG_COUNT_STREAM_ITEM_ON(stat->_flag)) {
+      stat->_streamItemCount++;
+   }
    return TRIE_VISITOR_RET_CONT;
 }
 
@@ -791,8 +1311,9 @@ DeleteLeafNode(BlockTrackingSparseBitmapVisitor *visitor,
  */
 
 static inline TrieVisitorReturnCode
-DeserializeVisitNullNode(BlockTrackingSparseBitmapVisitor *visitor,
-                         uint64 nodeAddr, uint8 height, TrieNode *pNode)
+DeserializeVisitNode(BlockTrackingSparseBitmapVisitor *visitor,
+                     uint64 nodeAddr, uint8 height,
+                     TrieNode *pNode)
 {
    BlockTrackingBitmapCallbackData *data =
       (BlockTrackingBitmapCallbackData *)visitor->_data;
@@ -802,25 +1323,93 @@ DeserializeVisitNullNode(BlockTrackingSparseBitmapVisitor *visitor,
       (const BlockTrackingSparseBitmapStream*)data->_cbData;
    uint64 targetNodeAddr;
    uint64 maxNodeAddr;
+   uint8 targetHeight = 0;
+   Bool isTargetCollapsed = FALSE;
 
-   if (stream == streamEnd || stream->_nodeOffset == -1) {
-      return TRIE_VISITOR_RET_END;
+   // skip all items that before the node
+   // they should be covered by previous collapsed node
+   while (TRUE) {
+      if (stream == streamEnd || stream->_nodeOffset == STREAM_ITEM_END) {
+         return TRIE_VISITOR_RET_END;
+      }
+
+      if (stream->_nodeOffset == STREAM_ITEM_COLLAPSED_NODE) {
+         // collapsed node
+         isTargetCollapsed = TRUE;
+         targetNodeAddr = stream->_payLoad._collapsedNode._addr;
+         targetHeight = stream->_payLoad._collapsedNode._height;
+      } else {
+         // leaf node
+         targetNodeAddr = stream->_nodeOffset << ADDR_BITS_IN_LEAF;
+      }
+      if (targetNodeAddr >= nodeAddr) {
+         break; // target is not less than node addree then jump out
+      }
+      // go to the next item of stream
+      ++stream;
    }
 
-   targetNodeAddr = stream->_nodeOffset << ADDR_BITS_IN_LEAF;
-   maxNodeAddr = nodeAddr | NODE_VALUE_MASK(height+1);
-
-   ASSERT(targetNodeAddr >= nodeAddr);
+   maxNodeAddr = NODE_MAX_ADDR(nodeAddr, height);
+   // target node address is bigger than the max of current one
+   // so skip all sub tries (children).
    if (targetNodeAddr > maxNodeAddr) {
       return TRIE_VISITOR_RET_SKIP_CHILDREN;
    }
-   if (*pNode == NULL) {
+
+   // NOW, target node is in range of current one
+
+   // target is collapsed and the current node is at the same address and height
+   // so make current one collapsed and skip all children.
+   if (isTargetCollapsed &&
+       targetNodeAddr == nodeAddr && targetHeight == height) {
+      if (!TrieIsCollapsedNode(*pNode)) {
+         // free the trie
+         BlockTrackingSparseBitmapVisitor deleteTrie = {
+            DeleteLeafNode,
+            NULL,
+            DeleteInnerNode,
+            NULL,
+            DeleteCollapsedNode,
+            NULL,
+            visitor->_stat
+         };
+         TrieAccept(pNode, nodeAddr,  height, 0, -1, &deleteTrie);
+         *pNode = NULL;
+         TrieCollapseNode(pNode, nodeAddr, height, visitor->_stat);
+      }
+      // go to the next item of stream
+      ++stream;
+      data->_cb = (void *)stream;
+      return TRIE_VISITOR_RET_SKIP_CHILDREN;
+   }
+
+   ASSERT(NODE_MAX_ADDR(targetNodeAddr, targetHeight) <= maxNodeAddr);
+
+   if (TrieIsCollapsedNode(*pNode)) {
+      // collapsed node
+      // to the next stream
+      ++stream;
+      data->_cb = (void *)stream;
+   } else if (*pNode == NULL) {
+      // access null node
       if ((*pNode = AllocateTrieNode(visitor->_stat, height == 0)) == NULL) {
-         return TRIE_VISITOR_RET_OUT_OF_MEM;
+         if (visitor->_stat != NULL &&
+             IS_TRIE_STAT_FLAG_OOM_AS_COLLAPSED_ON(visitor->_stat->_flag)) {
+            // cannot allocate memory
+            // make a collapsed node
+            TrieCollapseNode(pNode, nodeAddr, height, visitor->_stat);
+         } else {
+            return TRIE_VISITOR_RET_OUT_OF_MEM;
+         }
       }
    } else if (height == 0) {
-      TrieLeafNodeMergeFlatBitmap(*pNode, (const char *)stream->_node._bitmap,
+      // leaf node
+      TrieLeafNodeMergeFlatBitmap(*pNode,
+                                  (const char *)stream->_payLoad._node._bitmap,
                                   visitor->_stat);
+      if (TrieIsFullNode(*pNode)) {
+         TrieCollapseNode(pNode, nodeAddr, height, visitor->_stat);
+      }
       // to the next stream
       ++stream;
       data->_cb = (void *)stream;
@@ -829,19 +1418,52 @@ DeserializeVisitNullNode(BlockTrackingSparseBitmapVisitor *visitor,
 }
 
 static inline TrieVisitorReturnCode
-DeserializeVisitInnerNode(BlockTrackingSparseBitmapVisitor *visitor,
-                          uint64 nodeAddr, uint8 height, TrieNode node)
+DeserializeVisitNullNode(BlockTrackingSparseBitmapVisitor *visitor,
+                         uint64 nodeAddr, uint8 height,
+                         uint64 fromAddr, uint64 toAddr,
+                         TrieNode *pNode)
 {
-   return DeserializeVisitNullNode(visitor, nodeAddr, height, &node);
+   return DeserializeVisitNode(visitor, nodeAddr, height, pNode);
+}
+
+static inline TrieVisitorReturnCode
+DeserializePreVisitInnerNode(BlockTrackingSparseBitmapVisitor *visitor,
+                             uint64 nodeAddr, uint8 height,
+                             uint64 fromAddr, uint64 toAddr,
+                             TrieNode *pNode)
+{
+   return DeserializeVisitNode(visitor, nodeAddr, height, pNode);
+}
+
+static inline TrieVisitorReturnCode
+DeserializePostVisitInnerNode(BlockTrackingSparseBitmapVisitor *visitor,
+                              uint64 nodeAddr, uint8 height,
+                              uint64 fromAddr, uint64 toAddr,
+                              TrieNode *pNode)
+{
+   // bottom up collapse
+   if (TrieIsFullNode(*pNode)) {
+      TrieCollapseNode(pNode, nodeAddr, height, visitor->_stat);
+   }
+   return TRIE_VISITOR_RET_CONT;
 }
 
 static inline TrieVisitorReturnCode
 DeserializeVisitLeafNode(BlockTrackingSparseBitmapVisitor *visitor,
                          uint64 nodeAddr,
                          uint16 fromOffset, uint16 toOffset,
-                         TrieNode node)
+                         TrieNode *pNode)
 {
-   return DeserializeVisitNullNode(visitor, nodeAddr, 0, &node);
+   return DeserializeVisitNode(visitor, nodeAddr, 0, pNode);
+}
+
+static inline TrieVisitorReturnCode
+DeserializeVisitCollapsedNode(BlockTrackingSparseBitmapVisitor *visitor,
+                              uint64 nodeAddr, uint8 height,
+                              uint64 fromAddr, uint64 toAddr,
+                              TrieNode *pNode)
+{
+   return DeserializeVisitNode(visitor, nodeAddr, height, pNode);
 }
 
 
@@ -852,7 +1474,7 @@ DeserializeVisitLeafNode(BlockTrackingSparseBitmapVisitor *visitor,
 static inline TrieVisitorReturnCode
 SerializeVisitLeafNode(BlockTrackingSparseBitmapVisitor *visitor,
                        uint64 nodeAddr, uint16 fromOffset, uint16 toOffset,
-                       TrieNode node)
+                       TrieNode *pNode)
 {
    BlockTrackingBitmapCallbackData *data =
       (BlockTrackingBitmapCallbackData *)visitor->_data;
@@ -864,7 +1486,8 @@ SerializeVisitLeafNode(BlockTrackingSparseBitmapVisitor *visitor,
 
    if (stream != streamEnd) {
       stream->_nodeOffset = nodeOffset;
-      memcpy(stream->_node._bitmap, node->_bitmap, sizeof(*node));
+      memcpy(stream->_payLoad._node._bitmap,
+             (*pNode)->_bitmap, sizeof(**pNode));
       // to the next stream
       ++stream;
       data->_cb = (void *)stream;
@@ -873,19 +1496,30 @@ SerializeVisitLeafNode(BlockTrackingSparseBitmapVisitor *visitor,
    return TRIE_VISITOR_RET_OVERFLOW;
 }
 
-
-/**
- *  A visitor to count leaf
- */
-
 static inline TrieVisitorReturnCode
-CountLeafVisitLeafNode(BlockTrackingSparseBitmapVisitor *visitor,
-                       uint64 nodeAddr, uint16 fromOffset, uint16 toOffset,
-                       TrieNode node)
+SerializeVisitCollapsedNode(BlockTrackingSparseBitmapVisitor *visitor,
+                            uint64 nodeAddr, uint8 height,
+                            uint64 fromAddr, uint64 toAddr,
+                            TrieNode *pNode)
 {
-   uint16 *count = (uint16 *)visitor->_data;
-   ++(*count);
-   return TRIE_VISITOR_RET_CONT;
+   BlockTrackingBitmapCallbackData *data =
+      (BlockTrackingBitmapCallbackData *)visitor->_data;
+   BlockTrackingSparseBitmapStream *stream =
+      (BlockTrackingSparseBitmapStream *)data->_cb;
+   BlockTrackingSparseBitmapStream *streamEnd =
+      (BlockTrackingSparseBitmapStream *)data->_cbData;
+
+   if (stream != streamEnd) {
+      // magic number to indicate a collapsed node
+      stream->_nodeOffset = STREAM_ITEM_COLLAPSED_NODE;
+      // store node address and height
+      stream->_payLoad._collapsedNode._addr = nodeAddr;
+      stream->_payLoad._collapsedNode._height = height;
+      ++stream;
+      data->_cb = (void *)stream;
+      return TRIE_VISITOR_RET_CONT;
+   }
+   return TRIE_VISITOR_RET_OVERFLOW;
 }
 
 
@@ -910,7 +1544,7 @@ CountLeafVisitLeafNode(BlockTrackingSparseBitmapVisitor *visitor,
  *-----------------------------------------------------------------------------
  */
 
-CBTBitmapError
+static CBTBitmapError
 BlockTrackingSparseBitmapTranslateTrieRetCode(TrieVisitorReturnCode trieRetCode)
 {
    CBTBitmapError ret = CBT_BMAP_ERR_FAIL;
@@ -961,20 +1595,23 @@ BlockTrackingSparseBitmapAccept(CBTBitmap bitmap,
                                 BlockTrackingSparseBitmapVisitor *visitor)
 {
    uint8 i = TrieMaxHeight(fromAddr);
+   uint64 nodeAddr;
    TrieVisitorReturnCode trieRetCode = TRIE_VISITOR_RET_ABORT;
    if (!TrieIndexValidation(i)) {
       return CBT_BMAP_ERR_INVALID_ADDR;
    }
 
-   for (; i < MAX_NUM_TRIES && fromAddr <= toAddr ; ++i) {
+   for (nodeAddr = (i == 0) ? 0 : (NODE_MAX_ADDR(0, i-1) + 1);
+        i < MAX_NUM_TRIES && nodeAddr <= toAddr;
+        nodeAddr = NODE_MAX_ADDR(0, i) + 1, ++i) {
       trieRetCode =
-         TrieAccept(&bitmap->_tries[i], i, &fromAddr, toAddr, visitor);
+         TrieAccept(&bitmap->_tries[i], nodeAddr, i, fromAddr, toAddr, visitor);
       if (trieRetCode != TRIE_VISITOR_RET_CONT &&
           trieRetCode != TRIE_VISITOR_RET_SKIP_CHILDREN) {
          break;
       }
    }
-   if ((i == MAX_NUM_TRIES || fromAddr > toAddr) &&
+   if ((i == MAX_NUM_TRIES || nodeAddr > toAddr) &&
        (trieRetCode == TRIE_VISITOR_RET_SKIP_CHILDREN ||
         trieRetCode == TRIE_VISITOR_RET_CONT)) {
       trieRetCode = TRIE_VISITOR_RET_END;
@@ -986,9 +1623,9 @@ BlockTrackingSparseBitmapAccept(CBTBitmap bitmap,
 /*
  *-----------------------------------------------------------------------------
  *
- * BlockTrackingSparseBitmapDeleteT_tries --
+ * BlockTrackingSparseBitmapDeleteTries --
  *
- *    Delete all t_tries in the bitmap.
+ *    Delete all tries in the bitmap.
  *
  * Parameter:
  *    bitmap - input/output. CBT bitmap instance.
@@ -1000,13 +1637,19 @@ BlockTrackingSparseBitmapAccept(CBTBitmap bitmap,
  */
 
 static CBTBitmapError
-BlockTrackingSparseBitmapDeleteT_tries(CBTBitmap bitmap)
+BlockTrackingSparseBitmapDeleteTries(CBTBitmap bitmap)
 {
    CBTBitmapError ret;
-   BlockTrackingSparseBitmapVisitor deleteTrie =
-      {DeleteLeafNode, NULL, DeleteInnerNode, NULL, NULL,
-       (IS_TRIE_STAT_FLAG_MEMORY_ALLOC_ON(bitmap->_stat._flag)) ? &bitmap->_stat : NULL
-      };
+   BlockTrackingSparseBitmapVisitor deleteTrie = {
+      DeleteLeafNode,
+      NULL,
+      DeleteInnerNode,
+      NULL,
+      DeleteCollapsedNode,
+      NULL,
+      (IS_TRIE_STAT_FLAG_MEMORY_ALLOC_ON(bitmap->_stat._flag)) ?
+         &bitmap->_stat : NULL
+   };
    ret = BlockTrackingSparseBitmapAccept(bitmap, 0, -1, &deleteTrie);
    if (IS_TRIE_STAT_FLAG_MEMORY_ALLOC_ON(bitmap->_stat._flag)) {
       ASSERT(bitmap->_stat._memoryInUse == sizeof(*bitmap));
@@ -1039,18 +1682,19 @@ BlockTrackingSparseBitmapSetBit(CBTBitmap bitmap, uint64 addr,
 {
    CBTBitmapError ret;
    Bool isSet = FALSE;
-   BlockTrackingSparseBitmapVisitor setBit =
-      {SetBitVisitLeafNode, NULL, NULL,
-       AllocateNodeVisitNullNode, &isSet,
-       (TRIE_STAT_FLAG_IS_NULL(bitmap->_stat._flag)) ? NULL : &bitmap->_stat
-      };
+   BlockTrackingSparseBitmapVisitor setBit = {
+      SetBitVisitLeafNode,
+      NULL,
+      SetBitPostVisitInnerNode,
+      AllocateNodeVisitNullNode,
+      NULL,
+      &isSet,
+      (TRIE_STAT_FLAG_IS_NULL(bitmap->_stat._flag)) ? NULL : &bitmap->_stat
+   };
 
    ret = BlockTrackingSparseBitmapAccept(bitmap, addr, addr, &setBit);
 
    if (ret == CBT_BMAP_ERR_OK) {
-      if (IS_TRIE_STAT_FLAG_BITSET_ON(bitmap->_stat._flag) && !isSet) {
-         bitmap->_stat._totalSet++;
-      }
       if (isSetBefore != NULL) {
          *isSetBefore = isSet;
       }
@@ -1081,10 +1725,15 @@ static CBTBitmapError
 BlockTrackingSparseBitmapSetBits(CBTBitmap bitmap,
                                  uint64 fromAddr, uint64 toAddr)
 {
-   BlockTrackingSparseBitmapVisitor setBits =
-      {SetBitsVisitLeafNode, NULL, NULL, AllocateNodeVisitNullNode, NULL,
-       (TRIE_STAT_FLAG_IS_NULL(bitmap->_stat._flag)) ? NULL : &bitmap->_stat
-      };
+   BlockTrackingSparseBitmapVisitor setBits = {
+      SetBitsVisitLeafNode,
+      SetBitsPreVisitInnerNode,
+      SetBitsPostVisitInnerNode,
+      SetBitsVisitNullNode,
+      NULL,
+      bitmap->_tries,
+      (TRIE_STAT_FLAG_IS_NULL(bitmap->_stat._flag)) ? NULL : &bitmap->_stat
+   };
 
    return BlockTrackingSparseBitmapAccept(bitmap, fromAddr, toAddr, &setBits);
 }
@@ -1093,10 +1742,15 @@ static CBTBitmapError
 BlockTrackingSparseBitmapQueryBit(CBTBitmap bitmap,
                                   uint64 addr, Bool *isSetBefore)
 {
-   BlockTrackingSparseBitmapVisitor queryBit =
-      {QueryBitVisitLeafNode, NULL, NULL,
-       QueryBitVisitNullNode, isSetBefore, NULL
-      };
+   BlockTrackingSparseBitmapVisitor queryBit = {
+      QueryBitVisitLeafNode,
+      NULL,
+      NULL,
+      QueryBitVisitNullNode,
+      QueryBitVisitCollapsedNode,
+      isSetBefore,
+      NULL
+   };
    return BlockTrackingSparseBitmapAccept(bitmap, addr, addr, &queryBit);
 }
 
@@ -1107,63 +1761,16 @@ BlockTrackingSparseBitmapTraverseByBit(CBTBitmap bitmap,
                                        void *cbData)
 {
    BlockTrackingBitmapCallbackData data = {cb, cbData};
-   BlockTrackingSparseBitmapVisitor traverse =
-      {TraverseVisitLeafNode, NULL, NULL, NULL, &data, NULL};
+   BlockTrackingSparseBitmapVisitor traverse = {
+      TraverseVisitLeafNode,
+      NULL,
+      NULL,
+      NULL,
+      TraverseVisitCollapsedNode,
+      &data,
+      NULL
+   };
    return BlockTrackingSparseBitmapAccept(bitmap, fromAddr, toAddr, &traverse);
-}
-
-
-/*
- * The callback data for traverse extents.
- */
-
-typedef struct {
-   uint64 _start;
-   uint64 _end;
-   uint64 _extStart;
-   uint64 _extEnd;
-   CBTBitmapAccessExtentCB _extHdl;
-   void *_extHdlData;
-   Bool _extHdlRet;
-} GetExtentsData;
-
-
-/*
- * The callback of traverse extents.
- */
-
-static Bool
-GetExtents(void *data, uint64 addr)
-{
-   GetExtentsData *extData = (GetExtentsData *)data;
-   if (addr < extData->_start) {
-      return TRUE; // continue
-   } else if (addr > extData->_end) {
-      if (!extData->_extHdl(extData->_extHdlData,
-                            extData->_extStart, extData->_extEnd)) {
-         extData->_extHdlRet = FALSE;
-      }
-      extData->_extStart = extData->_extEnd = -1;
-      return FALSE;
-   } else {
-      if (extData->_extStart == -1) {
-         // start of the extent
-         extData->_extStart = addr;
-         extData->_extEnd = addr;
-      } else if (addr == extData->_extEnd + 1) {
-         // advance the end of extent
-         extData->_extEnd = addr;
-      } else {
-         // end of the extent
-         if (!extData->_extHdl(extData->_extHdlData,
-                               extData->_extStart, extData->_extEnd)) {
-            extData->_extHdlRet = FALSE;
-            return FALSE;
-         }
-         extData->_extStart = extData->_extEnd = addr;
-      }
-   }
-   return TRUE;
 }
 
 
@@ -1194,11 +1801,21 @@ BlockTrackingSparseBitmapTraverseByExtent(
                                     CBTBitmapAccessExtentCB cb,
                                     void *cbData)
 {
-   GetExtentsData extData = {fromAddr, toAddr, -1, -1, cb, cbData, TRUE};
-   BlockTrackingSparseBitmapTraverseByBit(bitmap, fromAddr, toAddr,
-                                          GetExtents, &extData);
-   if (!extData._extHdlRet) {
-      return CBT_BMAP_ERR_FAIL;
+   GetExtentsData extData = {-1, -1, cbData};
+   BlockTrackingBitmapCallbackData data = {cb, &extData};
+   BlockTrackingSparseBitmapVisitor traverse = {
+      TraverseExtVisitLeafNode,
+      NULL,
+      NULL,
+      TraverseExtVisitNullNode,
+      TraverseExtVisitCollapsedNode,
+      &data,
+      NULL
+   };
+   CBTBitmapError err;
+   err = BlockTrackingSparseBitmapAccept(bitmap, fromAddr, toAddr, &traverse);
+   if (err != CBT_BMAP_ERR_OK) {
+      return err;
    }
    if (extData._extStart != -1) {
       if (!cb(cbData, extData._extStart, extData._extEnd)) {
@@ -1229,9 +1846,15 @@ static CBTBitmapError
 BlockTrackingSparseBitmapUpdateStatistics(CBTBitmap bitmap)
 {
    uint16 flag;
-   BlockTrackingSparseBitmapVisitor updateStat =
-      {UpdateStatVisitLeafNode, UpdateStatVisitInnerNode, NULL, NULL, NULL,
-       &bitmap->_stat};
+   BlockTrackingSparseBitmapVisitor updateStat = {
+      UpdateStatVisitLeafNode,
+      UpdateStatVisitInnerNode,
+      NULL,
+      NULL,
+      UpdateStateVisitCollapsedNode,
+      NULL,
+      &bitmap->_stat
+   };
    ASSERT(!TRIE_STAT_FLAG_IS_NULL(bitmap->_stat._flag));
    flag = bitmap->_stat._flag;
    memset(&bitmap->_stat, 0, sizeof(bitmap->_stat));
@@ -1268,11 +1891,15 @@ BlockTrackingSparseBitmapDeserialize(CBTBitmap bitmap,
    uint32 len = streamLen / sizeof(*begin);
    BlockTrackingSparseBitmapStream *end = begin + len;
    BlockTrackingBitmapCallbackData data = {begin, end};
-   BlockTrackingSparseBitmapVisitor deserialize =
-      {DeserializeVisitLeafNode, DeserializeVisitInnerNode, NULL,
-       DeserializeVisitNullNode, &data,
-       (TRIE_STAT_FLAG_IS_NULL(bitmap->_stat._flag)) ? NULL : &bitmap->_stat
-      };
+   BlockTrackingSparseBitmapVisitor deserialize = {
+      DeserializeVisitLeafNode,
+      DeserializePreVisitInnerNode,
+      DeserializePostVisitInnerNode,
+      DeserializeVisitNullNode,
+      DeserializeVisitCollapsedNode,
+      &data,
+      (TRIE_STAT_FLAG_IS_NULL(bitmap->_stat._flag)) ? NULL : &bitmap->_stat
+   };
    return BlockTrackingSparseBitmapAccept(bitmap, 0, -1, &deserialize);
 }
 
@@ -1305,14 +1932,21 @@ BlockTrackingSparseBitmapSerialize(CBTBitmap bitmap,
    uint32 len = streamLen / sizeof(*begin);
    BlockTrackingSparseBitmapStream *end = begin + len;
    BlockTrackingBitmapCallbackData data = {begin, end};
-   BlockTrackingSparseBitmapVisitor serialize =
-      {SerializeVisitLeafNode, NULL, NULL, NULL, &data, NULL};
+   BlockTrackingSparseBitmapVisitor serialize = {
+      SerializeVisitLeafNode,
+      NULL,
+      NULL,
+      NULL,
+      SerializeVisitCollapsedNode,
+      &data,
+      NULL
+   };
    ret = BlockTrackingSparseBitmapAccept(bitmap, 0, -1, &serialize);
    // append a terminator as the end of stream if the stream is not exhausted
    if (ret == CBT_BMAP_ERR_OK) {
       begin = (BlockTrackingSparseBitmapStream *)data._cb;
       if (begin != end) {
-         begin->_nodeOffset = -1;
+         begin->_nodeOffset = STREAM_ITEM_END;
       }
    }
    return ret;
@@ -1346,11 +1980,14 @@ BlockTrackingSparseBitmapMakeTrieStatFlag(uint16 mode)
       flag = 0;
    }
    if (mode & CBT_BMAP_MODE_FAST_SERIALIZE) {
-      flag |= TRIE_STAT_FLAG_COUNT_LEAF;
+      flag |= TRIE_STAT_FLAG_COUNT_STREAM_ITEM;
    }
    if (mode & CBT_BMAP_MODE_FAST_STATISTIC) {
       flag |= TRIE_STAT_FLAG_BITSET;
       flag |= TRIE_STAT_FLAG_MEMORY_ALLOC;
+   }
+   if (mode & CBT_BMAP_MODE_NO_MEMORY_FAIL) {
+      flag |= TRIE_STAT_FLAG_OOM_AS_COLLAPSED;
    }
    return flag;
 }
@@ -1410,7 +2047,7 @@ void
 CBTBitmap_Destroy(CBTBitmap bitmap)
 {
    if (bitmap != NULL) {
-      BlockTrackingSparseBitmapDeleteT_tries(bitmap);
+      BlockTrackingSparseBitmapDeleteTries(bitmap);
       FreeBitmap(bitmap);
    }
 }
@@ -1418,17 +2055,15 @@ CBTBitmap_Destroy(CBTBitmap bitmap)
 CBTBitmapError
 CBTBitmap_SetAt(CBTBitmap bitmap, uint64 addr, Bool *oldValue)
 {
-   if (bitmap == NULL) {
-      return CBT_BMAP_ERR_INVALID_ARG;
-   }
-
+   ASSERT(bitmap != NULL);
    return BlockTrackingSparseBitmapSetBit(bitmap, addr, oldValue);
 }
 
 CBTBitmapError
 CBTBitmap_SetInRange(CBTBitmap bitmap, uint64 fromAddr, uint64 toAddr)
 {
-   if (bitmap == NULL || toAddr < fromAddr) {
+   ASSERT(bitmap != NULL);
+   if (toAddr < fromAddr) {
       return CBT_BMAP_ERR_INVALID_ARG;
    }
 
@@ -1438,7 +2073,8 @@ CBTBitmap_SetInRange(CBTBitmap bitmap, uint64 fromAddr, uint64 toAddr)
 CBTBitmapError
 CBTBitmap_IsSet(CBTBitmap bitmap, uint64 addr, Bool *isSet)
 {
-   if (bitmap == NULL || isSet == NULL) {
+   ASSERT(bitmap != NULL);
+   if (isSet == NULL) {
       return CBT_BMAP_ERR_INVALID_ARG;
    }
    return BlockTrackingSparseBitmapQueryBit(bitmap, addr, isSet);
@@ -1448,7 +2084,8 @@ CBTBitmapError
 CBTBitmap_TraverseByBit(CBTBitmap bitmap, uint64 fromAddr, uint64 toAddr,
                         CBTBitmapAccessBitCB cb, void *cbData)
 {
-   if (bitmap == NULL || cb == NULL || toAddr < fromAddr) {
+   ASSERT(bitmap != NULL);
+   if (cb == NULL || toAddr < fromAddr) {
       return CBT_BMAP_ERR_INVALID_ARG;
    }
    return BlockTrackingSparseBitmapTraverseByBit(bitmap, fromAddr, toAddr,
@@ -1459,26 +2096,26 @@ CBTBitmapError
 CBTBitmap_TraverseByExtent(CBTBitmap bitmap, uint64 fromAddr, uint64 toAddr,
                            CBTBitmapAccessExtentCB cb, void *cbData)
 {
-   if (bitmap == NULL || cb == NULL || toAddr < fromAddr) {
+   ASSERT(bitmap != NULL);
+   if (cb == NULL || toAddr < fromAddr) {
       return CBT_BMAP_ERR_INVALID_ARG;
    }
    return BlockTrackingSparseBitmapTraverseByExtent(bitmap, fromAddr, toAddr,
                                                     cb, cbData);
 }
 
-CBTBitmapError
+void
 CBTBitmap_Swap(CBTBitmap bitmap1, CBTBitmap bitmap2)
 {
    struct CBTBitmap tmp;
-   if (bitmap1 == NULL || bitmap2 == NULL) {
-      return CBT_BMAP_ERR_INVALID_ARG;
-   }
+   ASSERT(bitmap1 != NULL);
+   ASSERT(bitmap2 != NULL);
+
    if (bitmap1 != bitmap2) {
       memcpy(&tmp, bitmap1, sizeof(tmp));
       memcpy(bitmap1, bitmap2, sizeof(tmp));
       memcpy(bitmap2, &tmp, sizeof(tmp));
    }
-   return CBT_BMAP_ERR_OK;
 }
 
 CBTBitmapError
@@ -1487,14 +2124,18 @@ CBTBitmap_Merge(CBTBitmap dest, CBTBitmap src)
    uint8 i;
    TrieStatistics *stat;
    TrieVisitorReturnCode trieRetCode = TRIE_VISITOR_RET_CONT;
+   uint64 nodeAddr = 0;
 
-   if (dest == NULL || src == NULL) {
+   ASSERT(dest != NULL);
+   if (src == NULL) {
       return CBT_BMAP_ERR_INVALID_ARG;
    }
 
    stat = (TRIE_STAT_FLAG_IS_NULL(dest->_stat._flag)) ? NULL : &dest->_stat;
-   for (i = 0; i < MAX_NUM_TRIES ; ++i) {
-      trieRetCode = TrieMerge(&dest->_tries[i], src->_tries[i], i, stat);
+   for (i = 0; i < MAX_NUM_TRIES;
+        nodeAddr = NODE_MAX_ADDR(0, i) + 1, ++i) {
+      trieRetCode = TrieMerge(&dest->_tries[i], src->_tries[i], nodeAddr, i,
+                              stat);
       if (trieRetCode != TRIE_VISITOR_RET_CONT &&
           trieRetCode != TRIE_VISITOR_RET_SKIP_CHILDREN) {
          break;
@@ -1512,7 +2153,8 @@ CBTBitmap_Merge(CBTBitmap dest, CBTBitmap src)
 CBTBitmapError
 CBTBitmap_Deserialize(CBTBitmap bitmap, const char *stream, uint32 streamLen)
 {
-   if (bitmap == NULL || stream == NULL || streamLen == 0) {
+   ASSERT(bitmap != NULL);
+   if (stream == NULL || streamLen == 0) {
       return CBT_BMAP_ERR_INVALID_ARG;
    }
 
@@ -1522,7 +2164,8 @@ CBTBitmap_Deserialize(CBTBitmap bitmap, const char *stream, uint32 streamLen)
 CBTBitmapError
 CBTBitmap_Serialize(CBTBitmap bitmap, char *stream, uint32 streamLen)
 {
-   if (bitmap == NULL || stream == NULL || streamLen == 0) {
+   ASSERT(bitmap != NULL);
+   if (stream == NULL || streamLen == 0) {
       return CBT_BMAP_ERR_INVALID_ARG;
    }
 
@@ -1544,66 +2187,60 @@ CBTBitmap_GetStreamMaxSize(uint64 maxAddr, uint32 *streamLen)
    return CBT_BMAP_ERR_OK;
 }
 
-CBTBitmapError
-CBTBitmap_GetStreamSize(CBTBitmap bitmap, uint32 *streamLen)
+uint32
+CBTBitmap_GetStreamSize(CBTBitmap bitmap)
 {
-   CBTBitmapError ret = CBT_BMAP_ERR_OK;
-   uint16 leafCount;
-   if (bitmap == NULL || streamLen == NULL) {
-      return CBT_BMAP_ERR_INVALID_ARG;
-   }
-   if (!IS_TRIE_STAT_FLAG_COUNT_LEAF_ON(bitmap->_stat._flag)) {
+   uint16 streamItemCount;
+   ASSERT(bitmap != NULL);
+   if (!IS_TRIE_STAT_FLAG_COUNT_STREAM_ITEM_ON(bitmap->_stat._flag)) {
       TrieStatistics stat = bitmap->_stat;
       memset(&bitmap->_stat, 0, sizeof(bitmap->_stat));
-      bitmap->_stat._flag |= TRIE_STAT_FLAG_COUNT_LEAF;
+      bitmap->_stat._flag |= TRIE_STAT_FLAG_COUNT_STREAM_ITEM;
       BlockTrackingSparseBitmapUpdateStatistics(bitmap);
-      leafCount = bitmap->_stat._leafCount;
+      streamItemCount = bitmap->_stat._streamItemCount;
       bitmap->_stat = stat;
    } else {
-      leafCount = bitmap->_stat._leafCount;
+      streamItemCount = bitmap->_stat._streamItemCount;
    }
-   ASSERT(leafCount <= MAX_NUM_LEAVES);
-   ++leafCount; // need a terminator
-   *streamLen = leafCount * sizeof(BlockTrackingSparseBitmapStream);
-   return ret;
+   ASSERT(streamItemCount <= MAX_NUM_LEAVES);
+   ++streamItemCount; // need a terminator
+   return streamItemCount * sizeof(BlockTrackingSparseBitmapStream);
 }
 
-CBTBitmapError
-CBTBitmap_GetBitCount(CBTBitmap bitmap, uint32 *bitCount)
+uint32
+CBTBitmap_GetBitCount(CBTBitmap bitmap)
 {
-   if (bitmap == NULL || bitCount == 0) {
-      return CBT_BMAP_ERR_INVALID_ARG;
-   }
+   uint32 bitCount;
+   ASSERT(bitmap != NULL);
    if (!IS_TRIE_STAT_FLAG_BITSET_ON(bitmap->_stat._flag)) {
       TrieStatistics stat = bitmap->_stat;
       memset(&bitmap->_stat, 0, sizeof(bitmap->_stat));
       bitmap->_stat._flag |= TRIE_STAT_FLAG_BITSET;
       BlockTrackingSparseBitmapUpdateStatistics(bitmap);
-      *bitCount = bitmap->_stat._totalSet;
+      bitCount = bitmap->_stat._totalSet;
       bitmap->_stat = stat;
    } else {
-      *bitCount = bitmap->_stat._totalSet;
+      bitCount = bitmap->_stat._totalSet;
    }
-   return CBT_BMAP_ERR_OK;
+   return bitCount;
 }
 
-CBTBitmapError
-CBTBitmap_GetMemoryInUse(CBTBitmap bitmap, uint32 *memoryInUse)
+uint32
+CBTBitmap_GetMemoryInUse(CBTBitmap bitmap)
 {
-   if (bitmap == NULL || memoryInUse == 0) {
-      return CBT_BMAP_ERR_INVALID_ARG;
-   }
+   uint32 memoryInUse;
+   ASSERT(bitmap != NULL);
    if (!IS_TRIE_STAT_FLAG_MEMORY_ALLOC_ON(bitmap->_stat._flag)) {
       TrieStatistics stat = bitmap->_stat;
       memset(&bitmap->_stat, 0, sizeof(bitmap->_stat));
       bitmap->_stat._flag |= TRIE_STAT_FLAG_MEMORY_ALLOC;
       BlockTrackingSparseBitmapUpdateStatistics(bitmap);
-      *memoryInUse = bitmap->_stat._memoryInUse;
+      memoryInUse = bitmap->_stat._memoryInUse;
       bitmap->_stat = stat;
    } else {
-      *memoryInUse = bitmap->_stat._memoryInUse;
+      memoryInUse = bitmap->_stat._memoryInUse;
    }
-   return CBT_BMAP_ERR_OK;
+   return memoryInUse;
 }
 
 uint64
@@ -1611,3 +2248,144 @@ CBTBitmap_GetCapacity()
 {
    return MAX_NUM_LEAVES * (1ul << ADDR_BITS_IN_LEAF);
 }
+
+#ifdef CBT_BITMAP_UNITTEST
+#include <stdio.h>
+#define LEAF_NAME_PREFIX "Leaf"
+#define INNER_NAME_PREFIX "Inner"
+#define COLLAPSED_NAME_PREFIX "Collapsed"
+
+#define CHILD_OFFSET(p, c) ((uint64)(c)-(uint64)(p))/sizeof(TrieNode)
+
+#define NODE_NAME_LENGTH 64
+
+typedef struct {
+  char _parentName[NODE_NAME_LENGTH];
+  TrieNode _parentNode;
+} TraverseInfo;
+
+typedef struct TraverseContext {
+   TraverseInfo _info[MAX_NUM_TRIES];
+   uint8 _size;
+} TraverseContext;
+
+static inline const char *
+MakeNodeName(const char *prefix)
+{
+   static int id = 0;
+   static char name[NODE_NAME_LENGTH];
+   snprintf(name, sizeof name, "%s_%d", prefix, ++id);
+   return name;
+}
+
+static inline TrieVisitorReturnCode
+DumpVisitLeafNode(BlockTrackingSparseBitmapVisitor *visitor,
+                  uint64 nodeAddr, uint16 fromOffset, uint16 toOffset,
+                  TrieNode *pNode)
+{
+   BlockTrackingBitmapCallbackData *data =
+      (BlockTrackingBitmapCallbackData *)visitor->_data;
+   CBTBitmapDumpCb *cb = (CBTBitmapDumpCb*)data->_cb;
+   TraverseContext *ctx = (TraverseContext *)visitor->_stat;
+   TraverseInfo *info = &ctx->_info[ctx->_size-1];
+   const char *name = MakeNodeName(LEAF_NAME_PREFIX);
+   if (!cb->AddLeafNode(data->_cbData, info->_parentName,
+                        CHILD_OFFSET(info->_parentNode, pNode),
+                        name, (*pNode)->_bitmap, sizeof (*pNode)->_bitmap)) {
+      return TRIE_VISITOR_RET_ABORT;
+   }
+   return TRIE_VISITOR_RET_CONT;
+}
+
+static inline TrieVisitorReturnCode
+DumpPostVisitInnerNode(BlockTrackingSparseBitmapVisitor *visitor,
+                       uint64 nodeAddr, uint8 height,
+                       uint64 fromAddr, uint64 toAddr,
+                       TrieNode *pNode)
+{
+   TraverseContext *ctx = (TraverseContext *)visitor->_stat;
+   ctx->_size--;
+   return TRIE_VISITOR_RET_CONT;
+}
+
+static inline TrieVisitorReturnCode
+DumpPreVisitInnerNode(BlockTrackingSparseBitmapVisitor *visitor,
+                   uint64 nodeAddr, uint8 height,
+                   uint64 fromAddr, uint64 toAddr,
+                   TrieNode *pNode)
+{
+   BlockTrackingBitmapCallbackData *data =
+      (BlockTrackingBitmapCallbackData *)visitor->_data;
+   CBTBitmapDumpCb *cb = (CBTBitmapDumpCb*)data->_cb;
+   TraverseContext *ctx = (TraverseContext *)visitor->_stat;
+   TraverseInfo *info = &ctx->_info[ctx->_size-1];
+   TraverseInfo *newInfo = &ctx->_info[ctx->_size];
+   const char *name = MakeNodeName(INNER_NAME_PREFIX);
+   if (!cb->AddInnerNode(data->_cbData, info->_parentName,
+                         CHILD_OFFSET(info->_parentNode, pNode),
+                         name, NUM_TRIE_WAYS)) {
+      return TRIE_VISITOR_RET_ABORT;
+   }
+   strncpy(newInfo->_parentName, name, sizeof newInfo->_parentName);
+   newInfo->_parentNode = *pNode;
+   ctx->_size++;
+
+   return TRIE_VISITOR_RET_CONT;
+}
+
+static inline TrieVisitorReturnCode
+DumpVisitCollapsedNode(BlockTrackingSparseBitmapVisitor *visitor,
+                           uint64 nodeAddr, uint8 height,
+                           uint64 fromAddr, uint64 toAddr,
+                           TrieNode *pNode)
+{
+   BlockTrackingBitmapCallbackData *data =
+      (BlockTrackingBitmapCallbackData *)visitor->_data;
+   CBTBitmapDumpCb *cb = (CBTBitmapDumpCb*)data->_cb;
+   TraverseContext *ctx = (TraverseContext *)visitor->_stat;
+   TraverseInfo *info = &ctx->_info[ctx->_size-1];
+   if (!cb->AddCollapsedNode(data->_cbData, info->_parentName,
+                             CHILD_OFFSET(info->_parentNode, pNode),
+                             COLLAPSED_NAME_PREFIX, NUM_TRIE_WAYS)) {
+      return TRIE_VISITOR_RET_ABORT;
+   }
+   return TRIE_VISITOR_RET_CONT;
+}
+
+static CBTBitmapError
+BlockTrackingSparseBitmapDump(CBTBitmap bitmap,
+                              CBTBitmapDumpCb *cb,
+                              void *cbData)
+{
+   TraverseContext ctx;
+   BlockTrackingBitmapCallbackData data = {cb, cbData};
+   BlockTrackingSparseBitmapVisitor dump = {
+      DumpVisitLeafNode,
+      DumpPreVisitInnerNode,
+      DumpPostVisitInnerNode,
+      NULL,
+      DumpVisitCollapsedNode,
+      &data,
+      (TrieStatistics*)&ctx
+   };
+   strcpy(ctx._info[0]._parentName, "root");
+   ctx._info[0]._parentNode = (TrieNode)&bitmap->_tries[0];
+   ctx._size = 1;
+   if (!cb->AddRoot(cbData, MAX_NUM_TRIES)) {
+      return TRIE_VISITOR_RET_ABORT;
+   }
+   return BlockTrackingSparseBitmapAccept(bitmap, 0, -1, &dump);
+}
+
+CBTBitmapError
+CBTBitmap_Dump(CBTBitmap bitmap, CBTBitmapDumpCb *cb, void *data)
+{
+   ASSERT(bitmap != NULL);
+   if (cb == NULL) {
+      return CBT_BMAP_ERR_INVALID_ARG;
+   }
+
+   return BlockTrackingSparseBitmapDump(bitmap, cb, data);
+}
+
+#endif
